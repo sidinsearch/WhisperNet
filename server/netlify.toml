@@ -1,8 +1,0 @@
-[build]
-  functions = "netlify/functions"
-
-# Set up redirects to make the bootstrap endpoint more user-friendly
-[[redirects]]
-  from = "/api/bootstrap"
-  to = "/.netlify/functions/bootstrap"
-  status = 200
