@@ -1,92 +1,85 @@
-import express from "express";
-import { searchUser, sendMessange } from "./utils.js";
+// base-node.js
+import express from 'express';
 import http from 'http';
-import { Server } from "socket.io";
-const PORT = 8080;
+import { Server } from 'socket.io';
+import cors from 'cors';
 
 const app = express();
+app.use(cors());
+
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+    cors: { origin: "*" }
+});
 
-const onlineUsers = new Set();
+const userToRelayMap = {}; // { username: socketId }
+const relaySockets = {};   // { socketId: socket }
 
-let users = {};
-// app.use(express.json());
+// Add to base-node.js
+app.get('/relay', (req, res) => {
+    const relayIds = Object.keys(relaySockets);
+    console.log(relayIds);
 
-// app.get('/', (req, res) => {
-//     res.send('HomePage!');
-// });
+    if (relayIds.length > 0) {
+        const randomRelayId = relayIds[Math.floor(Math.random() * relayIds.length)];
+        console.log(randomRelayId);
 
-// app.post('/ping', (req, res) => {
-//     const { id } = req.body;
-//     const user = searchUser(id);
-//     if(!user) {
-//         res.json({message: 'User not found!'});
-//         return;
-//     }
-//     onlineUsers.add(id);
-//     console.log(user.name+' is online!');
-//     res.json(user);
-// });
+        const relaySocket = relaySockets[randomRelayId];
+        console.log(relaySocket);
 
-// app.post('/sendMessage', (req, res) => {
-//     const { senderId, receiverId, message } = req.body;
-//     if(!onlineUsers.has(senderId)) {
-//         res.json({
-//             error: 'Internal server erorr!'
-//         });
-//         return;
-//     }
-//     console.log(receiverId, message);
-//     const user = searchUser(receiverId);
-//     if(!user) {
-//         res.json({
-//             error: 'User not found!'
-//         });
-//         return;
-//     }
-//     if(onlineUsers.has(receiverId)) {
-//         sendMessange();
-//         res.json({
-//             msg: 'Message sent successfully!'
-//         });
-//         return;
-//     }
-//     res.json({
-//         error: 'User is not online!'
-//     });
-//     return;
-// });
+        return res.json({ success: true, relay: relaySocket });
+    } else {
+        // No relay available, use base node as fallback
+        return res.json({
+            success: false,
+            fallback: {
+                ip: "localhost",
+                port: 5000
+            }
+        });
+    }
+});
+
 
 io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.id}`);
+    console.log('Relay connected:', socket.id);
+    relaySockets[socket.id] = {
+        ip: socket.handshake.auth.ip,
+        port: socket.handshake.auth.port
+    };
 
-    socket.on('register', (username) => {
-        users[username] = socket.id;
-        console.log(`User registered: ${username} -> ${socket.id}`);
+    // Relay registers a user
+    socket.on('registerUser', ({ username }) => {
+        userToRelayMap[username] = socket.id;
+        console.log(`User ${username} registered via relay ${socket.id}`);
     });
 
-    socket.on('send_message', ({sender, receiver, message}) => {
-        console.log(`Message from ${sender} to ${receiver}: ${message}`);
+    // Relay asks to route a message to another user
+    socket.on('routeMessage', ({ from, to, message }) => {
+        const targetRelayId = userToRelayMap[to];
+        const targetRelaySocket = relaySockets[targetRelayId];
 
-        if (users[receiver]) {
-            io.to(users[receiver]).emit("receive_message", { sender, message });
+        if (targetRelaySocket) {
+            targetRelaySocket.emit('deliverMessage', { from, to, message });
+            console.log(`Routing message from ${from} to ${to} via relay ${targetRelayId}`);
         } else {
-            console.log(`User ${receiver} not found`);
+            console.log(`User ${to} not found on any relay`);
         }
     });
 
+    // Cleanup on disconnect
     socket.on('disconnect', () => {
-        console.log(`User disconnected: ${socket.id}`);
-        for (const user in users) {
-            if (users[user] === socket.id) {
-                delete users[user];
-                break;
+        console.log('Relay disconnected:', socket.id);
+        for (const [username, relayId] of Object.entries(userToRelayMap)) {
+            if (relayId === socket.id) {
+                delete userToRelayMap[username];
             }
         }
+        delete relaySockets[socket.id];
     });
 });
 
+const PORT = 5000;
 server.listen(PORT, () => {
-    console.log(`App is running on http://localhost:${PORT}`);
+    console.log(`Base node listening on port ${PORT}`);
 });
