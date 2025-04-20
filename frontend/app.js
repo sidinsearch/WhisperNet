@@ -3,7 +3,7 @@ import readline from "readline";
 import { io } from "socket.io-client";
 import axios from "axios";
 
-const BASE_NODE_URL = "http://localhost:5000";
+const BASE_NODE_URL = "https://whispernet-rk67.onrender.com";
 
 const rl = readline.createInterface({
   input: process.stdin,

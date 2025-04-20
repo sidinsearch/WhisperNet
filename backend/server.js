@@ -33,13 +33,11 @@ app.get('/relay', (req, res) => {
         return res.json({
             success: false,
             fallback: {
-                ip: "localhost",
-                port: 5000
+                url: "https://whispernet-rk67.onrender.com"
             }
         });
     }
 });
-
 
 io.on('connection', (socket) => {
     console.log('Relay connected:', socket.id);
