@@ -1,127 +1,116 @@
-import React, { useState, useEffect, useRef } from "react";
-import { io } from "socket.io-client";
-import axios from "axios";
+import React, { useState, useRef, useEffect } from 'react';
+import io from 'socket.io-client';
+import axios from 'axios';
 
-const BASE_NODE_URL = process.env.REACT_APP_BASE_NODE_URL || "http://localhost:5000";
+const BASE_NODE_URL = process.env.REACT_APP_BASE_NODE_URL || 'http://localhost:5000';
 
 function App() {
-  const [username, setUsername] = useState("");
-  const [recipient, setRecipient] = useState("");
-  const [message, setMessage] = useState("");
+  const [username, setUsername] = useState('');
+  const [recipient, setRecipient] = useState('');
+  const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const [connected, setConnected] = useState(false);
-  const [error, setError] = useState("");
+  const [status, setStatus] = useState('Disconnected');
   const socketRef = useRef(null);
-  const chatEndRef = useRef(null);
+  const messagesEndRef = useRef(null);
 
   useEffect(() => {
-    if (connected) return;
-    if (!username) return;
-    const connectToRelay = async () => {
-      try {
-        const res = await axios.get(`${BASE_NODE_URL}/relay`);
-        const { success, relay, fallback } = res.data;
-        const relayUrl = success
-          ? `http://${relay.ip}:${relay.port}`
-          : `http://${fallback.ip}:${fallback.port}`;
-        socketRef.current = io(relayUrl);
-        socketRef.current.emit("register", { username }, (response) => {
-          if (!response.success) {
-            setError(response.reason);
-            setUsername("");
-            return;
+    if (connected) {
+      socketRef.current = io(BASE_NODE_URL.replace(/\/$/, ''), {
+        transports: ['websocket']
+      });
+      setStatus('Connecting');
+      socketRef.current.on('connect', () => {
+        setStatus('Connected');
+        socketRef.current.emit('register', { username }, (res) => {
+          if (!res.success) {
+            setStatus('Username taken');
+            setConnected(false);
+            socketRef.current.disconnect();
           }
-          setConnected(true);
         });
-        socketRef.current.on("receiveMessage", ({ from, message }) => {
-          setMessages((msgs) => [...msgs, { from, message }]);
-        });
-      } catch (err) {
-        setError("Failed to connect to relay server");
-      }
-    };
-    connectToRelay();
-    // eslint-disable-next-line
-  }, [username]);
+      });
+      socketRef.current.on('disconnect', () => {
+        setStatus('Disconnected');
+      });
+      socketRef.current.on('receiveMessage', ({ from, message }) => {
+        setMessages((msgs) => [...msgs, { from, message }]);
+      });
+      return () => {
+        socketRef.current.disconnect();
+      };
+    }
+  }, [connected, username]);
 
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  const handleLogin = (e) => {
+    e.preventDefault();
+    if (username) setConnected(true);
+  };
 
   const handleSend = (e) => {
     e.preventDefault();
     if (!recipient || !message) return;
-    socketRef.current.emit("sendMessage", {
-      to: recipient,
-      message
-    }, (response) => {
-      if (!response.delivered) {
-        setMessages((msgs) => [...msgs, { from: "System", message: `User '${recipient}' is offline or unavailable.` }]);
-      } else {
+    socketRef.current.emit('sendMessage', { to: recipient, message }, (res) => {
+      if (res?.delivered) {
         setMessages((msgs) => [...msgs, { from: username, message }]);
+        setMessage('');
+      } else {
+        setStatus(res?.reason || 'Delivery failed');
       }
     });
-    setMessage("");
   };
 
-  if (!username) {
-    return (
-      <div className="container vh-100 d-flex align-items-center justify-content-center">
-        <div className="chat-window w-100" style={{ maxWidth: 400 }}>
-          <h2 className="mb-4 text-center">WhisperNet Messenger</h2>
-          {error && <div className="alert alert-danger">{error}</div>}
-          <form onSubmit={e => { e.preventDefault(); setUsername(e.target.username.value); setError(""); }}>
-            <div className="mb-3">
-              <label className="form-label">Enter your username</label>
-              <input name="username" className="form-control" required autoFocus />
-            </div>
-            <button className="btn btn-primary w-100">Join</button>
-          </form>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="container vh-100 d-flex align-items-center justify-content-center">
-      <div className="chat-window w-100" style={{ maxWidth: 500, minHeight: 500 }}>
-        <div className="d-flex justify-content-between align-items-center mb-3">
-          <h4 className="mb-0">Hi, {username}</h4>
-          <button className="btn btn-sm btn-danger" onClick={() => { setUsername(""); setConnected(false); setMessages([]); setError(""); }}>Logout</button>
-        </div>
-        <div className="mb-3">
-          <input
-            className="form-control"
-            placeholder="Recipient username"
-            value={recipient}
-            onChange={e => setRecipient(e.target.value)}
-            required
-          />
-        </div>
-        <div className="mb-3" style={{ height: 300, overflowY: 'auto', background: '#181a1b', borderRadius: 8, padding: 10 }}>
-          {messages.length === 0 && <div className="text-muted text-center">No messages yet.</div>}
-          {messages.map((msg, idx) => (
-            <div key={idx} className="message-row clearfix">
-              <div className={
-                "message-bubble " + (msg.from === username ? "sent float-end" : msg.from === "System" ? "received float-start bg-warning text-dark" : "received float-start")
-              }>
-                <span className="fw-bold">{msg.from}:</span> {msg.message}
-              </div>
+    <div style={{ background: '#181c20', minHeight: '100vh', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ background: '#23272f', padding: 32, borderRadius: 12, minWidth: 350, boxShadow: '0 4px 24px #0006' }}>
+        <h2 style={{ textAlign: 'center', marginBottom: 24 }}>WhisperNet</h2>
+        {!connected ? (
+          <form onSubmit={handleLogin}>
+            <input
+              style={{ width: '100%', padding: 10, marginBottom: 12, borderRadius: 6, border: 'none', fontSize: 16 }}
+              placeholder="Enter username"
+              value={username}
+              onChange={e => setUsername(e.target.value)}
+              required
+            />
+            <button style={{ width: '100%', padding: 10, borderRadius: 6, background: '#4ecdc4', color: '#181c20', fontWeight: 'bold', fontSize: 16, border: 'none' }} type="submit">Login</button>
+            <div style={{ marginTop: 12, color: '#f66', textAlign: 'center' }}>{status !== 'Disconnected' && status}</div>
+          </form>
+        ) : (
+          <>
+            <div style={{ marginBottom: 16, color: '#4ecdc4', textAlign: 'center' }}>Status: {status}</div>
+            <form onSubmit={handleSend} style={{ display: 'flex', marginBottom: 16 }}>
+              <input
+                style={{ flex: 1, padding: 10, borderRadius: 6, border: 'none', fontSize: 16, marginRight: 8 }}
+                placeholder="Recipient username"
+                value={recipient}
+                onChange={e => setRecipient(e.target.value)}
+                required
+              />
+              <input
+                style={{ flex: 2, padding: 10, borderRadius: 6, border: 'none', fontSize: 16, marginRight: 8 }}
+                placeholder="Type a message"
+                value={message}
+                onChange={e => setMessage(e.target.value)}
+                required
+              />
+              <button style={{ padding: '0 18px', borderRadius: 6, background: '#4ecdc4', color: '#181c20', fontWeight: 'bold', fontSize: 16, border: 'none' }} type="submit">Send</button>
+            </form>
+            <div style={{ background: '#181c20', borderRadius: 8, padding: 12, minHeight: 180, maxHeight: 300, overflowY: 'auto', marginBottom: 8 }}>
+              {messages.map((msg, i) => (
+                <div key={i} style={{ marginBottom: 8, color: msg.from === username ? '#4ecdc4' : '#fff' }}>
+                  <b>{msg.from}:</b> {msg.message}
+                </div>
+              ))}
+              <div ref={messagesEndRef} />
             </div>
-          ))}
-          <div ref={chatEndRef} />
-        </div>
-        <form className="d-flex" onSubmit={handleSend} autoComplete="off">
-          <input
-            className="form-control me-2"
-            placeholder="Type your message..."
-            value={message}
-            onChange={e => setMessage(e.target.value)}
-            required
-            autoFocus
-          />
-          <button className="btn btn-success">Send</button>
-        </form>
+            <button style={{ width: '100%', padding: 10, borderRadius: 6, background: '#f66', color: '#fff', fontWeight: 'bold', fontSize: 16, border: 'none' }} onClick={() => setConnected(false)}>Logout</button>
+          </>
+        )}
       </div>
     </div>
   );
