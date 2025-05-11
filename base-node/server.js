@@ -31,24 +31,29 @@ io.on('connection', (socket) => {
     if (ack) ack({ success: true });
   });
 
-  socket.on('registerUser', ({ username }, ack) => {
-    if (userRegistry[username]) {
-      if (ack) ack({ success: false, reason: 'Username already taken' });
+  // Update your userRegistry to store device IDs
+  const userRegistry = {}; // username -> { relayId, deviceId }
+  
+  // Update your registerUser handler
+  socket.on('registerUser', ({ username, deviceId }, ack) => {
+    if (userRegistry[username] && userRegistry[username].deviceId !== deviceId) {
+      if (ack) ack({ success: false, reason: 'Username already taken by another device' });
       return;
     }
-    userRegistry[username] = socket.id;
+    userRegistry[username] = { relayId: socket.id, deviceId };
     if (ack) ack({ success: true });
   });
-
-  socket.on('routeMessage', ({ from, to, message }, ack) => {
-    const relayId = userRegistry[to];
-    if (!relayId) {
+  
+  // Update your routeMessage handler
+  socket.on('routeMessage', ({ from, to, message, deviceId }, ack) => {
+    const relayInfo = userRegistry[to];
+    if (!relayInfo) {
       if (ack) ack({ delivered: false, reason: 'User not found' });
       return;
     }
-    const relaySocket = io.sockets.sockets.get(relayId);
+    const relaySocket = io.sockets.sockets.get(relayInfo.relayId);
     if (relaySocket) {
-      relaySocket.emit('deliverMessage', { from, to, message });
+      relaySocket.emit('deliverMessage', { from, to, message, fromDeviceId: deviceId });
       if (ack) ack({ delivered: true });
     } else {
       if (ack) ack({ delivered: false, reason: 'Relay not found' });
