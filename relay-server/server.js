@@ -29,6 +29,16 @@ const socketUsers = {}; // socket.id -> username
 io.on('connection', (socket) => {
   // Add to your existing socket.on('register') handler
   socket.on('register', ({ username, deviceId }, ack) => {
+    // Check if username is already registered with a different device ID
+    const existingUser = Object.values(socketUsers).find(user => 
+      user.username === username && user.deviceId !== deviceId
+    );
+    
+    if (existingUser) {
+      if (ack) ack({ success: false, reason: 'Username already taken by another device' });
+      return;
+    }
+    
     baseSocket.emit('registerUser', { username, deviceId }, (response) => {
       if (!response.success) {
         if (ack) ack({ success: false, reason: response.reason });
@@ -40,10 +50,24 @@ io.on('connection', (socket) => {
     });
   });
   
+  // Add relay info endpoint
+  socket.on('getRelayInfo', (_, ack) => {
+    if (ack) ack({ 
+      url: `${RELAY_IP}:${RELAY_PORT}`,
+      ip: RELAY_IP,
+      port: RELAY_PORT
+    });
+  });
+  
   // Update your sendMessage handler
   socket.on('sendMessage', ({ to, message, deviceId }, ack) => {
+    const fromUser = socketUsers[socket.id];
+    if (!fromUser) {
+      if (ack) ack({ delivered: false, reason: 'Not registered' });
+      return;
+    }
+    
     if (userSockets[to]) {
-      const fromUser = socketUsers[socket.id];
       userSockets[to].emit('receiveMessage', {
         from: fromUser.username,
         message,
@@ -52,10 +76,10 @@ io.on('connection', (socket) => {
       if (ack) ack({ delivered: true });
     } else {
       baseSocket.emit('routeMessage', {
-        from: socketUsers[socket.id].username,
+        from: fromUser.username,
         to,
         message,
-        deviceId: deviceId || socketUsers[socket.id].deviceId
+        deviceId: deviceId || fromUser.deviceId
       }, (response) => {
         if (ack) ack(response);
       });
@@ -69,15 +93,18 @@ io.on('connection', (socket) => {
     }
   });
   socket.on('disconnect', () => {
-    const username = socketUsers[socket.id];
-    delete userSockets[username];
-    delete socketUsers[socket.id];
+    const user = socketUsers[socket.id];
+    if (user) {
+      delete userSockets[user.username];
+      delete socketUsers[socket.id];
+    }
   });
 });
 
-baseSocket.on('deliverMessage', ({ from, to, message }) => {
+// Update the deliverMessage handler
+baseSocket.on('deliverMessage', ({ from, to, message, fromDeviceId }) => {
   if (userSockets[to]) {
-    userSockets[to].emit('receiveMessage', { from, message });
+    userSockets[to].emit('receiveMessage', { from, message, fromDeviceId });
   }
 });
 

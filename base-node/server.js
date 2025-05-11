@@ -31,9 +31,7 @@ io.on('connection', (socket) => {
     if (ack) ack({ success: true });
   });
 
-  // Update your userRegistry to store device IDs
-  const userRegistry = {}; // username -> { relayId, deviceId }
-  
+  // Create a proper userRegistry object
   // Update your registerUser handler
   socket.on('registerUser', ({ username, deviceId }, ack) => {
     if (userRegistry[username] && userRegistry[username].deviceId !== deviceId) {
@@ -61,11 +59,13 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    // Clean up userRegistry when a socket disconnects
     for (const username in userRegistry) {
-      if (userRegistry[username] === socket.id) {
+      if (userRegistry[username].relayId === socket.id) {
         delete userRegistry[username];
       }
     }
+    // Clean up relaySockets when a socket disconnects
     for (const relayId in relaySockets) {
       if (relaySockets[relayId].id === socket.id) {
         delete relaySockets[relayId];
