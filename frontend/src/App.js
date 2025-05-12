@@ -53,7 +53,7 @@ function App() {
     setStatus('Checking relay status...');
     
     // Create a temporary socket just to check status
-    const tempSocket = io(BASE_NODE_URL.replace(/\/$/, ''), {
+    const tempSocket = io(RELAY_SERVER_URL.replace(/\/$/, ''), {
       transports: ['websocket'],
       reconnectionAttempts: 3,
       reconnectionDelay: 1000,
