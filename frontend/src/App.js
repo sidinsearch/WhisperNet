@@ -555,3 +555,9 @@ function App() {
 }
 
 export default App;
+
+// Add this function before the handleSend function
+const handleRecipientChange = (e) => {
+  setRecipient(e.target.value);
+  setRecipientStatus({ exists: false, online: false });
+};
