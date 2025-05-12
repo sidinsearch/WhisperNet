@@ -3,7 +3,7 @@ import io from 'socket.io-client';
 import axios from 'axios';
 import FingerprintJS from '@fingerprintjs/fingerprintjs';
 
-const BASE_NODE_URL = process.env.REACT_APP_BASE_NODE_URL || 'http://localhost:5000';
+const RELAY_SERVER_URL = "https://whispernet-basenode.onrender.com";
 
 // Initialize the fingerprint agent
 const fpPromise = FingerprintJS.load();
@@ -111,8 +111,8 @@ function App() {
       }
       
       // Connect to the base node with connection debugging
-      console.log('Attempting to connect to:', BASE_NODE_URL);
-      socketRef.current = io(BASE_NODE_URL.replace(/\/$/, ''), {
+      console.log('Attempting to connect to:', RELAY_SERVER_URL);
+      socketRef.current = io(RELAY_SERVER_URL.replace(/\/$/, ''), {
         transports: ['websocket'],
         reconnectionAttempts: 5,
         reconnectionDelay: 1000,
