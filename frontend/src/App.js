@@ -14,16 +14,18 @@ function App() {
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
   const [connected, setConnected] = useState(false);
-  const [status, setStatus] = useState('Disconnected');
+  const [status, setStatus] = useState('Checking relay status...');
   const [deviceId, setDeviceId] = useState('');
   const [connectionDetails, setConnectionDetails] = useState({});
   const [showConnectionInfo, setShowConnectionInfo] = useState(false);
   const [securityAlert, setSecurityAlert] = useState(null);
   const [typing, setTyping] = useState(false);
   const [relayServerUrl, setRelayServerUrl] = useState('Unknown');
-  const [relayStatus, setRelayStatus] = useState('Unknown');
+  const [relayStatus, setRelayStatus] = useState('checking');
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [recipientStatus, setRecipientStatus] = useState({ exists: false, online: false });
+  const [isCheckingUsername, setIsCheckingUsername] = useState(false);
+  const [usernameAvailable, setUsernameAvailable] = useState(true);
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
@@ -38,6 +40,68 @@ function App() {
     };
     getDeviceId();
   }, []);
+
+  // Check relay status on initial load
+  useEffect(() => {
+    if (deviceId) {
+      checkRelayStatus();
+    }
+  }, [deviceId]);
+
+  // Function to check relay status
+  const checkRelayStatus = () => {
+    setStatus('Checking relay status...');
+    
+    // Create a temporary socket just to check status
+    const tempSocket = io(BASE_NODE_URL.replace(/\/$/, ''), {
+      transports: ['websocket'],
+      reconnectionAttempts: 3,
+      reconnectionDelay: 1000,
+      timeout: 5000
+    });
+    
+    tempSocket.on('connect', () => {
+      setRelayStatus('online');
+      setStatus('Relay server online. Please login.');
+      tempSocket.disconnect();
+    });
+    
+    tempSocket.on('connect_error', (err) => {
+      console.error('Connection error:', err);
+      setRelayStatus('offline');
+      setStatus('Relay server offline. Please try again later.');
+      tempSocket.disconnect();
+    });
+    
+    // Set timeout for connection attempt
+    setTimeout(() => {
+      if (relayStatus === 'checking') {
+        setRelayStatus('timeout');
+        setStatus('Connection timeout. Please try again later.');
+        tempSocket.disconnect();
+      }
+    }, 5000);
+  };
+
+  // Check if username is available
+  const checkUsernameAvailability = () => {
+    if (!username || !socketRef.current) return;
+    
+    setIsCheckingUsername(true);
+    socketRef.current.emit('checkUser', { username }, (res) => {
+      setIsCheckingUsername(false);
+      if (res && res.exists) {
+        setUsernameAvailable(false);
+        setSecurityAlert({
+          username: username,
+          message: `Username "${username}" is already taken. Please choose another.`
+        });
+      } else {
+        setUsernameAvailable(true);
+        handleLogin();
+      }
+    });
+  };
 
   useEffect(() => {
     if (connected) {
@@ -55,7 +119,7 @@ function App() {
         query: { deviceId }
       });
       
-      setStatus('Connecting');
+      setStatus('Connecting...');
       
       socketRef.current.on('connect', () => {
         setStatus('Connected');
@@ -80,6 +144,7 @@ function App() {
             socketRef.current.emit('getRelayInfo', null, (relayInfo) => {
               if (relayInfo) {
                 setRelayStatus(relayInfo.status || 'online');
+                setRelayServerUrl(relayInfo.url || 'Unknown');
                 setConnectionDetails(prev => ({
                   ...prev,
                   relayServerUrl: relayInfo.url,
@@ -87,6 +152,22 @@ function App() {
                 }));
               }
             });
+            
+            // Get online users
+            socketRef.current.emit('getOnlineUsers', null, (users) => {
+              if (users && Array.isArray(users)) {
+                setOnlineUsers(users);
+              }
+            });
+            
+            // Start ping interval to keep connection alive and update relay status
+            pingIntervalRef.current = setInterval(() => {
+              socketRef.current.emit('ping', null, (response) => {
+                if (response && response.relayStatus) {
+                  setRelayStatus(response.relayStatus);
+                }
+              });
+            }, 30000); // Every 30 seconds
           }
         });
       });
@@ -94,10 +175,12 @@ function App() {
       socketRef.current.on('connect_error', (err) => {
         console.error('Connection error:', err);
         setStatus(`Connection error: ${err.message}`);
+        setRelayStatus('offline');
       });
       
       socketRef.current.on('disconnect', (reason) => {
         setStatus(`Disconnected: ${reason}`);
+        setRelayStatus('offline');
         clearInterval(pingIntervalRef.current);
       });
       
@@ -125,7 +208,7 @@ function App() {
       
       socketRef.current.on('userStatusChange', ({ username: user, online }) => {
         if (user === recipient) {
-          setRecipientStatus(online ? 'Online' : 'Offline');
+          setRecipientStatus(prev => ({ ...prev, online }));
         }
         
         // Update online users list
@@ -139,6 +222,16 @@ function App() {
         });
       });
       
+      socketRef.current.on('relayStatusUpdate', ({ relayId, status }) => {
+        if (connectionDetails.relayServerUrl === relayId) {
+          setRelayStatus(status);
+          setConnectionDetails(prev => ({
+            ...prev,
+            relayStatus: status
+          }));
+        }
+      });
+      
       return () => {
         clearInterval(pingIntervalRef.current);
         socketRef.current.disconnect();
@@ -149,11 +242,11 @@ function App() {
   // Effect to check recipient status whenever recipient changes
   useEffect(() => {
     if (connected && socketRef.current && recipient) {
-      socketRef.current.emit('checkUserStatus', { username: recipient }, (res) => {
-        setRecipientStatus(res?.online ? 'Online' : 'Offline');
+      socketRef.current.emit('checkRecipient', { username: recipient }, (res) => {
+        setRecipientStatus(res || { exists: false, online: false });
       });
     } else {
-      setRecipientStatus('Unknown');
+      setRecipientStatus({ exists: false, online: false });
     }
   }, [connected, recipient]);
 
@@ -161,9 +254,24 @@ function App() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleLogin = (e) => {
+  const handleUsernameSubmit = (e) => {
     e.preventDefault();
-    if (username) setConnected(true);
+    if (username && relayStatus === 'online') {
+      // First connect to socket
+      setConnected(true);
+      // Username check will happen after connection in the useEffect
+    }
+  };
+
+  const handleLogin = () => {
+    // This is called after username availability check
+    console.log('Username available, proceeding with login');
+  };
+
+  // Handle recipient change
+  const handleRecipientChange = (e) => {
+    setRecipient(e.target.value);
+    setRecipientStatus({ exists: false, online: false });
   };
 
   // Check recipient status before sending
@@ -203,7 +311,7 @@ function App() {
       socketRef.current.emit('sendMessage', { to: recipient, message, deviceId }, (res) => {
         console.log('Message send response:', res);
         if (res?.delivered) {
-          setMessages((msgs) => [...msgs, { from: username, message, fromDeviceId: deviceId }]);
+          setMessages((msgs) => [...msgs, { from: username, message, fromDeviceId: deviceId, timestamp: new Date() }]);
           setMessage('');
         } else {
           setStatus(res?.reason || 'Delivery failed');
@@ -226,6 +334,10 @@ function App() {
 
   const dismissAlert = () => {
     setSecurityAlert(null);
+  };
+
+  const retryConnection = () => {
+    checkRelayStatus();
   };
 
   // Terminal-style timestamp
@@ -276,15 +388,15 @@ function App() {
             fontSize: 12, 
             padding: '4px 8px', 
             borderRadius: 4, 
-            background: status.includes('Connected') ? '#1c4b3c' : '#4b1c1c',
-            color: status.includes('Connected') ? '#5ccfe6' : '#ff8f40',
+            background: relayStatus === 'online' ? '#1c4b3c' : '#4b1c1c',
+            color: relayStatus === 'online' ? '#5ccfe6' : '#ff8f40',
             cursor: 'pointer'
           }} onClick={() => setShowConnectionInfo(!showConnectionInfo)}>
-            {status}
+            {relayStatus === 'online' ? 'Relay Online' : 'Relay Offline'}
           </div>
         </div>
         
-        {showConnectionInfo && connected && (
+        {showConnectionInfo && (
           <div style={{ 
             background: '#0d1117', 
             padding: 12, 
@@ -294,18 +406,22 @@ function App() {
             marginBottom: 16,
             border: '1px solid #1e2d3d'
           }}>
-            <div>Socket ID: {connectionDetails.socketId || 'unknown'}</div>
-            <div>Transport: {connectionDetails.transport || 'unknown'}</div>
-            <div>Base Node: {connectionDetails.baseNodeUrl || 'unknown'}</div>
-            <div>Relay Server: {connectionDetails.relayServerUrl || 'unknown'} 
-              <span style={{ 
-                color: connectionDetails.relayStatus === 'online' ? '#5ccfe6' : '#ff8f40',
-                marginLeft: 8
-              }}>
-                ({connectionDetails.relayStatus || relayStatus})
-              </span>
-            </div>
-            <div>Device ID: {deviceId.substring(0, 8)}...</div>
+            <div>Status: {status}</div>
+            {connected && (
+              <>
+                <div>Socket ID: {connectionDetails.socketId || 'unknown'}</div>
+                <div>Transport: {connectionDetails.transport || 'unknown'}</div>
+                <div>Base Node: {connectionDetails.baseNodeUrl || 'unknown'}</div>
+                <div>Relay Server: {connectionDetails.relayServerUrl || relayServerUrl}</div>
+              </>
+            )}
+            <div>Relay Status: <span style={{
+              color: relayStatus === 'online' ? '#bae67e' : '#ff8f40'
+            }}>{relayStatus}</span></div>
+            {deviceId && <div>Device ID: {deviceId.substring(0, 8)}...</div>}
+            {connected && onlineUsers.length > 0 && (
+              <div style={{ marginTop: 8 }}>Online Users: {onlineUsers.join(', ')}</div>
+            )}
           </div>
         )}
         
