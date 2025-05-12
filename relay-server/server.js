@@ -6,7 +6,7 @@ import { io as connectToBase } from 'socket.io-client';
 const app = express();
 app.get('/', (req, res) => {
   const baseNodeUrl = process.env.BASE_NODE_URL || 'http://localhost:5000';
-  res.send(`<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Relay Server Live</title><style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#181c20;color:#fff;font-family:sans-serif;flex-direction:column;}h1{font-size:4rem;letter-spacing:2px;}p{font-size:1.5rem;margin-top:2rem;}@media(max-width:600px){h1{font-size:2rem;}p{font-size:1rem;}}</style></head><body><h1>Relay Server is Live</h1><p>Base Node URL: <span style='color:#4ecdc4;'>${baseNodeUrl}</span></p></body></html>`);
+  res.send(`<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Relay Server Live</title><style>body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#181c20;color:#fff;font-family:sans-serif;flex-direction:column;}h1{font-size:4rem;letter-spacing:2px;}p{font-size:1.5rem;margin-top:2rem;}@media(max-width:600px){h1{font-size:2rem;}p{font-size:1rem;}}</style></head><body><h1>Relay Server is Live</h1><p>Base Node URL: <span style='color:#4ecdc4;'>${baseNodeUrl}</span></p></body></html>`);
 });
 
 const server = http.createServer(app);
@@ -23,8 +23,19 @@ const baseSocket = connectToBase(BASE_NODE_URL, {
   }
 });
 
+// Send heartbeat to base node
+setInterval(() => {
+  baseSocket.emit('relayHeartbeat', { ip: RELAY_IP, port: RELAY_PORT });
+}, 10000); // Every 10 seconds
+
 const userSockets = {}; // username -> socket
-const socketUsers = {}; // socket.id -> username
+const socketUsers = {}; // socket.id -> { username, deviceId, status }
+
+// Register with base node on connection
+baseSocket.on('connect', () => {
+  console.log('Connected to base node');
+  baseSocket.emit('registerRelay', { ip: RELAY_IP, port: RELAY_PORT });
+});
 
 io.on('connection', (socket) => {
   // Add to your existing socket.on('register') handler
@@ -45,9 +56,24 @@ io.on('connection', (socket) => {
         return;
       }
       userSockets[username] = socket;
-      socketUsers[socket.id] = { username, deviceId }; // Store both username and deviceId
+      socketUsers[socket.id] = { 
+        username, 
+        deviceId,
+        status: 'online'
+      };
       if (ack) ack({ success: true });
     });
+  });
+  
+  // Check if a user exists and is online
+  socket.on('checkRecipient', ({ username }, ack) => {
+    if (userSockets[username]) {
+      if (ack) ack({ exists: true, online: true });
+    } else {
+      baseSocket.emit('checkUser', { username }, (response) => {
+        if (ack) ack(response);
+      });
+    }
   });
   
   // Add relay info endpoint
@@ -55,7 +81,8 @@ io.on('connection', (socket) => {
     if (ack) ack({ 
       url: `${RELAY_IP}:${RELAY_PORT}`,
       ip: RELAY_IP,
-      port: RELAY_PORT
+      port: RELAY_PORT,
+      status: 'online'
     });
   });
   
@@ -67,6 +94,7 @@ io.on('connection', (socket) => {
       return;
     }
     
+    // First check if recipient exists
     if (userSockets[to]) {
       userSockets[to].emit('receiveMessage', {
         from: fromUser.username,
@@ -75,13 +103,27 @@ io.on('connection', (socket) => {
       });
       if (ack) ack({ delivered: true });
     } else {
-      baseSocket.emit('routeMessage', {
-        from: fromUser.username,
-        to,
-        message,
-        deviceId: deviceId || fromUser.deviceId
-      }, (response) => {
-        if (ack) ack(response);
+      // Check with base node if user exists but is on another relay
+      baseSocket.emit('checkUser', { username: to }, (response) => {
+        if (!response.exists) {
+          if (ack) ack({ delivered: false, reason: 'User not found' });
+          return;
+        }
+        
+        if (!response.online) {
+          if (ack) ack({ delivered: false, reason: 'User is offline' });
+          return;
+        }
+        
+        // User exists and is online, try to route the message
+        baseSocket.emit('routeMessage', {
+          from: fromUser.username,
+          to,
+          message,
+          deviceId: deviceId || fromUser.deviceId
+        }, (routeResponse) => {
+          if (ack) ack(routeResponse);
+        });
       });
     }
   });
@@ -92,6 +134,7 @@ io.on('connection', (socket) => {
       userSockets[to].emit('userTyping', { username: socketUsers[socket.id].username });
     }
   });
+  
   socket.on('disconnect', () => {
     const user = socketUsers[socket.id];
     if (user) {
