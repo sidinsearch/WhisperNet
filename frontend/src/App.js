@@ -151,7 +151,7 @@ function App() {
       });
       
       // Register with base node
-      socketRef.current.emit('register', { 
+      socketRef.current.emit('registerUser', { 
         username, 
         deviceId 
       }, (response) => {
