@@ -48,6 +48,15 @@ let relayId = null;
 const userSockets = {}; // username -> socket
 const socketUsers = {}; // socket.id -> { username, deviceId, status }
 
+// Storage for offline messages
+const pendingMessages = {}; // username -> [messages]
+
+// Relay capabilities
+const RELAY_CAPABILITIES = {
+  offlineRelay: true,  // Support for offline message relay
+  encryption: true     // Support for end-to-end encryption
+};
+
 // Base node connection
 let baseSocket = null;
 let reconnectAttempts = 0;
@@ -58,58 +67,86 @@ const connectToBaseNode = () => {
   
   baseSocket = connectToBase(BASE_NODE_URL, {
     transports: ['websocket', 'polling'],
-    timeout: 10000,
-    reconnection: true,
-    reconnectionDelay: 2000,
-    reconnectionDelayMax: 10000,
-    maxReconnectionAttempts: maxReconnectAttempts
+    timeout: 10000
   });
-
+  
   baseSocket.on('connect', () => {
-    console.log('Connected to base node successfully');
-    reconnectAttempts = 0;
+    console.log('Connected to base node');
     
-    // Register this relay with the base node
+    // Register this relay server with the base node
     baseSocket.emit('registerRelay', { 
       ip: RELAY_IP, 
-      port: RELAY_PORT 
+      port: RELAY_PORT,
+      capabilities: RELAY_CAPABILITIES 
     }, (response) => {
       if (response && response.success) {
         relayId = response.relayId || `${RELAY_IP}:${RELAY_PORT}`;
         console.log(`Relay registered with ID: ${relayId}`);
+        
+        // Get the list of available relays
+        baseSocket.emit('getRelays', {}, (relays) => {
+          if (Array.isArray(relays)) {
+            console.log(`Received relay list from base node: ${relays.length} relays`);
+            // Broadcast relay list to all connected clients
+            io.emit('relayList', relays);
+          }
+        });
       } else {
         console.error('Failed to register relay:', response);
       }
     });
   });
-
-  baseSocket.on('connect_error', (error) => {
-    console.error('Base node connection error:', error.message);
-    reconnectAttempts++;
+  
+  baseSocket.on('disconnect', () => {
+    console.log('Disconnected from base node');
     
-    if (reconnectAttempts >= maxReconnectAttempts) {
-      console.error('Max reconnection attempts reached. Relay will operate in standalone mode.');
-    }
+    // Try to reconnect after a delay
+    setTimeout(() => {
+      console.log('Attempting to reconnect to base node...');
+      connectToBaseNode();
+    }, 5000);
   });
-
-  baseSocket.on('disconnect', (reason) => {
-    console.log(`Disconnected from base node: ${reason}`);
-  });
-
-  // Handle message delivery from base node
-  baseSocket.on('deliverMessage', ({ from, to, message, fromDeviceId }) => {
-    console.log(`Delivering message from base node: ${from} -> ${to}`);
+  
+  // Handle message delivery requests from base node with encryption support
+  baseSocket.on('deliverMessage', ({ id, from, to, message, deviceId, encrypted, encryptedContent, iv, isNewDevice, timestamp }) => {
+    console.log(`Delivery request from base node: ${from} -> ${to}`);
     
+    // Check if recipient is connected to this relay
     if (userSockets[to]) {
-      userSockets[to].emit('receiveMessage', { 
-        from, 
-        message, 
-        fromDeviceId 
+      userSockets[to].emit('receiveMessage', {
+        id,
+        from,
+        message,
+        fromDeviceId: deviceId,
+        encrypted,
+        encryptedContent,
+        iv,
+        isNewDevice,
+        timestamp: timestamp || new Date().toISOString()
       });
       console.log(`Message delivered to ${to}`);
+      
+      // Confirm delivery to base node
+      if (id) {
+        baseSocket.emit('confirmMessageDelivery', { messageId: id, to });
+      }
     } else {
       console.log(`User ${to} not found on this relay`);
     }
+  });
+  
+  // Handle relay status updates
+  baseSocket.on('relayStatusUpdate', (data) => {
+    console.log(`Relay status update: ${data.relayId} is ${data.status}`);
+    // Forward to connected clients
+    io.emit('relayStatusUpdate', data);
+  });
+  
+  // Handle relay list updates
+  baseSocket.on('relayList', (relays) => {
+    console.log(`Received relay list update: ${relays.length} relays`);
+    // Forward to connected clients
+    io.emit('relayList', relays);
   });
 
   return baseSocket;
@@ -119,175 +156,391 @@ const connectToBaseNode = () => {
 connectToBaseNode();
 
 // Send heartbeat to base node
-const heartbeatInterval = setInterval(() => {
+setInterval(() => {
   if (baseSocket && baseSocket.connected) {
-    baseSocket.emit('relayHeartbeat', { 
-      relayId: relayId,
-      ip: RELAY_IP, 
-      port: RELAY_PORT 
-    });
+    baseSocket.emit('heartbeat', { relayId });
+    console.log('Sent heartbeat to base node');
   }
-}, 10000); // Every 10 seconds
+}, 30000); // Every 30 seconds
+
+// Clean up expired messages
+setInterval(() => {
+  const now = Date.now();
+  for (const username in pendingMessages) {
+    if (pendingMessages[username] && pendingMessages[username].length > 0) {
+      const validMessages = pendingMessages[username].filter(msg => now < msg.ttl);
+      if (validMessages.length !== pendingMessages[username].length) {
+        console.log(`Cleaned up ${pendingMessages[username].length - validMessages.length} expired messages for ${username}`);
+        pendingMessages[username] = validMessages;
+      }
+    }
+  }
+}, 60000); // Every minute
 
 // Handle client connections
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
-  // Handle user registration
-  socket.on('register', ({ username, deviceId }, ack) => {
+  // Handle user registration with device fingerprinting and encryption support
+  socket.on('register', ({ username, deviceId, publicKey }, ack) => {
     console.log(`Registration request: ${username} with device ${deviceId}`);
     
-    // Check if username is already taken locally
-    const existingUser = Object.values(socketUsers).find(user => 
-      user.username === username && user.deviceId !== deviceId
-    );
-    
-    if (existingUser) {
-      console.log(`Username ${username} already taken locally`);
-      if (ack) ack({ success: false, reason: 'Username already taken by another device on this relay' });
-      return;
-    }
-    
-    // Register with base node
-    if (baseSocket && baseSocket.connected) {
-      baseSocket.emit('registerUser', { 
-        username, 
-        deviceId, 
-        relayId: relayId 
-      }, (response) => {
-        if (response && response.success) {
-          // Successfully registered with base node
-          userSockets[username] = socket;
-          socketUsers[socket.id] = { 
-            username, 
-            deviceId,
-            status: 'online'
-          };
-          
-          console.log(`User ${username} registered successfully`);
-          if (ack) ack({ success: true });
+    // Check with base node if username is available
+    baseSocket.emit('checkUser', { username }, (response) => {
+      if (response.exists && response.online) {
+        // If it's the same device, allow reconnection
+        if (response.knownDevices && response.knownDevices.includes(deviceId)) {
+          console.log(`User ${username} reconnecting with same device`);
         } else {
-          console.log(`Base node rejected registration for ${username}:`, response?.reason);
-          if (ack) ack({ 
-            success: false, 
-            reason: response?.reason || 'Registration failed' 
-          });
+          console.log(`Username ${username} is already in use by a different device`);
+          if (ack) ack({ success: false, message: 'Username is already in use by a different device' });
+          return;
         }
-      });
-    } else {
-      // Base node not connected - register locally only
-      console.log(`Base node not connected, registering ${username} locally`);
+      }
+      
+      // Register user locally
       userSockets[username] = socket;
       socketUsers[socket.id] = { 
         username, 
-        deviceId,
-        status: 'online'
+        deviceId, 
+        status: 'online',
+        publicKey
       };
       
-      if (ack) ack({ success: true, warning: 'Registered locally only - base node not available' });
-    }
-  });
-  
-  // Check if a recipient exists and is online
-  socket.on('checkRecipient', ({ username }, ack) => {
-    // First check locally
-    if (userSockets[username]) {
-      if (ack) ack({ exists: true, online: true, location: 'local' });
-      return;
-    }
-    
-    // Check with base node
-    if (baseSocket && baseSocket.connected) {
-      baseSocket.emit('checkUser', { username }, (response) => {
-        if (ack) ack({ 
-          exists: response?.exists || false, 
-          online: response?.online || false,
-          location: 'remote'
-        });
+      // Register with base node
+      baseSocket.emit('registerUser', { 
+        username, 
+        deviceId, 
+        relayId,
+        publicKey
+      }, (baseResponse) => {
+        console.log(`Base node registration response:`, baseResponse);
+        
+        if (baseResponse && baseResponse.success) {
+          console.log(`User ${username} registered successfully`);
+          
+          // Check if there are any pending messages for this user
+          const userPendingMessages = pendingMessages[username] || [];
+          
+          if (userPendingMessages.length > 0) {
+            console.log(`Delivering ${userPendingMessages.length} pending messages to ${username}`);
+            
+            // Deliver each message
+            userPendingMessages.forEach(msg => {
+              socket.emit('receiveMessage', {
+                id: msg.id,
+                from: msg.from,
+                message: msg.content,
+                encrypted: msg.encrypted,
+                encryptedContent: msg.encryptedContent,
+                iv: msg.iv,
+                fromDeviceId: msg.fromDeviceId,
+                timestamp: msg.timestamp,
+                isOfflineMessage: true
+              });
+            });
+            
+            // Clear the pending messages for this user
+            delete pendingMessages[username];
+          }
+          
+          // If base node sent pending messages, deliver those too
+          if (baseResponse.pendingMessages && baseResponse.pendingMessages.length > 0) {
+            console.log(`Delivering ${baseResponse.pendingMessages.length} offline messages from base node to ${username}`);
+            
+            baseResponse.pendingMessages.forEach(msg => {
+              socket.emit('receiveMessage', {
+                id: msg.id,
+                from: msg.from,
+                message: msg.content,
+                encrypted: msg.encrypted,
+                encryptedContent: msg.encryptedContent,
+                iv: msg.iv,
+                fromDeviceId: msg.fromDeviceId,
+                timestamp: msg.timestamp,
+                isOfflineMessage: true
+              });
+            });
+          }
+          
+          if (ack) ack({ 
+            success: true, 
+            message: 'Registration successful',
+            relayId,
+            isNewDevice: baseResponse.isNewDevice
+          });
+        } else {
+          console.log(`Failed to register user ${username} with base node`);
+          delete userSockets[username];
+          delete socketUsers[socket.id];
+          
+          if (ack) ack({ 
+            success: false, 
+            message: baseResponse?.message || 'Registration failed'
+          });
+        }
       });
-    } else {
-      if (ack) ack({ exists: false, online: false, location: 'unknown' });
-    }
+    });
   });
-  
-  // Handle message sending
-  socket.on('sendMessage', ({ to, message, deviceId }, ack) => {
+
+  // Handle message sending with encryption and offline support
+  socket.on('sendMessage', ({ to, message, encrypted, encryptedContent, iv, ttl }, ack) => {
+    // Get sender information
     const fromUser = socketUsers[socket.id];
     if (!fromUser) {
-      console.log('Message from unregistered user');
-      if (ack) ack({ delivered: false, reason: 'Not registered' });
+      console.log('Unknown sender');
+      if (ack) ack({ success: false, message: 'You are not registered' });
       return;
     }
     
-    console.log(`Message from ${fromUser.username} to ${to}: ${message}`);
+    // Generate message ID
+    const messageId = Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
+    const timestamp = new Date().toISOString();
+    
+    console.log(`Message from ${fromUser.username} to ${to}`);
+    if (encrypted) {
+      console.log('Message is encrypted');
+    }
+    
+    // Create message object
+    const messageObj = {
+      id: messageId,
+      from: fromUser.username,
+      to,
+      content: message,
+      fromDeviceId: fromUser.deviceId,
+      timestamp,
+      encrypted,
+      encryptedContent,
+      iv,
+      ttl: ttl || (Date.now() + (4 * 60 * 60 * 1000)), // Default 4 hour TTL
+      bounceCount: 0,
+      maxBounces: 10
+    };
     
     // Check if recipient is connected to this relay
     if (userSockets[to]) {
-      // Local delivery
-      userSockets[to].emit('receiveMessage', {
-        from: fromUser.username,
-        message,
-        fromDeviceId: deviceId || fromUser.deviceId
-      });
-      
-      console.log(`Message delivered locally to ${to}`);
-      if (ack) ack({ delivered: true, method: 'local' });
-    } else {
-      // Try to route through base node
-      if (baseSocket && baseSocket.connected) {
-        baseSocket.emit('routeMessage', {
+      // Check if this is a new device and should trigger a warning
+      baseSocket.emit('checkUser', { username: to }, (response) => {
+        const isNewDevice = response.knownDevices && 
+                           !response.knownDevices.includes(fromUser.deviceId);
+        
+        // Deliver locally
+        userSockets[to].emit('receiveMessage', {
+          id: messageId,
           from: fromUser.username,
+          message,
+          encrypted,
+          encryptedContent,
+          iv,
+          fromDeviceId: fromUser.deviceId,
+          timestamp,
+          isNewDevice
+        });
+        
+        console.log(`Message delivered locally to ${to}`);
+        if (ack) ack({ success: true, message: 'Message delivered', id: messageId });
+      });
+    } else {
+      // Check with base node if user exists
+      baseSocket.emit('checkUser', { username: to }, (response) => {
+        if (!response.exists) {
+          // User doesn't exist
+          console.log(`User ${to} does not exist`);
+          
+          // If offline relay is enabled and TTL is provided, store the message
+          if (ttl) {
+            if (!pendingMessages[to]) {
+              pendingMessages[to] = [];
+            }
+            pendingMessages[to].push(messageObj);
+            console.log(`Message stored for future delivery to ${to}`);
+            if (ack) ack({ success: true, message: 'Message stored for future delivery', id: messageId });
+          } else {
+            if (ack) ack({ success: false, message: 'User does not exist' });
+          }
+          return;
+        }
+        
+        if (!response.online) {
+          // User exists but is offline
+          console.log(`User ${to} is offline`);
+          
+          // If offline relay is enabled and TTL is provided, store the message
+          if (ttl) {
+            // Route through base node for offline storage
+            baseSocket.emit('sendMessage', {
+              to,
+              message,
+              deviceId: fromUser.deviceId,
+              id: messageId,
+              encrypted,
+              encryptedContent,
+              iv,
+              ttl
+            }, (response) => {
+              console.log(`Offline message routing result:`, response);
+              if (ack) ack({ 
+                success: response?.success || false, 
+                message: response?.message || 'Routing failed',
+                id: messageId
+              });
+            });
+          } else {
+            if (ack) ack({ success: false, message: 'User is offline' });
+          }
+          return;
+        }
+        
+        // User exists and is online, but not on this relay
+        // Route through base node
+        baseSocket.emit('sendMessage', {
           to,
           message,
-          deviceId: deviceId || fromUser.deviceId
+          deviceId: fromUser.deviceId,
+          id: messageId,
+          encrypted,
+          encryptedContent,
+          iv
         }, (response) => {
           console.log(`Message routing result:`, response);
           if (ack) ack({ 
-            delivered: response?.delivered || false, 
-            reason: response?.reason,
-            method: 'routed'
+            success: response?.success || false, 
+            message: response?.message || 'Routing failed',
+            id: messageId
           });
         });
-      } else {
-        console.log('Cannot route message - base node not connected');
-        if (ack) ack({ 
-          delivered: false, 
-          reason: 'Base node not available for routing' 
-        });
-      }
-    }
-  });
-  
-  // Handle typing indicators
-  socket.on('typing', ({ to }) => {
-    if (userSockets[to]) {
-      userSockets[to].emit('userTyping', { 
-        username: socketUsers[socket.id]?.username 
       });
     }
   });
-  
-  // Get relay information
-  socket.on('getRelayInfo', (_, ack) => {
-    if (ack) ack({ 
-      url: `${RELAY_IP}:${RELAY_PORT}`,
-      ip: RELAY_IP,
-      port: RELAY_PORT,
-      status: baseSocket?.connected ? 'connected' : 'disconnected',
-      baseNodeUrl: BASE_NODE_URL,
-      relayId: relayId
+
+  // Handle incoming messages
+  socket.on('message', (message) => {
+    if (!message.to) {
+      return console.error('Received message without recipient');
+    }
+    
+    // Forward message to base node
+    baseSocket.emit('routeMessage', {
+      from: message.from,
+      to: message.to,
+      message
     });
   });
 
   socket.on('disconnect', () => {
     console.log(`Client disconnected: ${socket.id}`);
     
+    // Clean up user registry
     const user = socketUsers[socket.id];
     if (user) {
-      console.log(`User ${user.username} disconnected`);
-      delete userSockets[user.username];
+      const { username } = user;
+      console.log(`User ${username} disconnected`);
+      
+      // Remove from local registry
+      delete userSockets[username];
       delete socketUsers[socket.id];
+      
+      // Notify base node
+      baseSocket.emit('userDisconnected', { username, relayId });
     }
+  });
+  
+  // Handle message bounce requests (for offline message relay)
+  socket.on('bounceMessage', (message, ack) => {
+    // Increment bounce count
+    message.bounceCount = (message.bounceCount || 0) + 1;
+    
+    // Check if message has expired or reached max bounces
+    if (Date.now() > message.ttl || message.bounceCount > message.maxBounces) {
+      console.log(`Message ${message.id} expired or reached max bounces`);
+      if (ack) ack({ success: false, message: 'Message expired or reached max bounces' });
+      return;
+    }
+    
+    // Check if recipient is connected to this relay
+    if (userSockets[message.to]) {
+      // Deliver the message
+      userSockets[message.to].emit('receiveMessage', {
+        id: message.id,
+        from: message.from,
+        message: message.content,
+        encrypted: message.encrypted,
+        encryptedContent: message.encryptedContent,
+        iv: message.iv,
+        fromDeviceId: message.fromDeviceId,
+        timestamp: message.timestamp,
+        isOfflineMessage: true
+      });
+      
+      console.log(`Bounced message delivered to ${message.to}`);
+      if (ack) ack({ success: true, message: 'Message delivered' });
+      
+      // Confirm delivery to base node
+      baseSocket.emit('confirmMessageDelivery', { messageId: message.id, to: message.to });
+    } else {
+      // Store for offline delivery or bounce to base node
+      if (Math.random() < 0.5) { // 50% chance to store locally vs bounce to base node
+        // Store locally
+        if (!pendingMessages[message.to]) {
+          pendingMessages[message.to] = [];
+        }
+        pendingMessages[message.to].push(message);
+        console.log(`Bounced message stored locally for ${message.to}`);
+        if (ack) ack({ success: true, message: 'Message stored locally' });
+      } else {
+        // Bounce to base node
+        baseSocket.emit('bounceMessage', message, (response) => {
+          console.log(`Message bounce result:`, response);
+          if (ack) ack(response);
+        });
+      }
+    }
+  });
+  
+  // Handle public key exchange
+  socket.on('sharePublicKey', ({ username, publicKey }, ack) => {
+    const fromUser = socketUsers[socket.id];
+    if (!fromUser) {
+      console.log('Unknown sender trying to share public key');
+      if (ack) ack({ success: false, message: 'You are not registered' });
+      return;
+    }
+    
+    console.log(`${fromUser.username} is sharing public key with ${username}`);
+    
+    // Check if recipient is connected to this relay
+    if (userSockets[username]) {
+      userSockets[username].emit('publicKeyShared', {
+        from: fromUser.username,
+        publicKey,
+        deviceId: fromUser.deviceId
+      });
+      
+      console.log(`Public key shared with ${username}`);
+      if (ack) ack({ success: true, message: 'Public key shared' });
+    } else {
+      // Route through base node
+      baseSocket.emit('sharePublicKey', {
+        from: fromUser.username,
+        to: username,
+        publicKey,
+        deviceId: fromUser.deviceId
+      }, (response) => {
+        console.log(`Public key sharing result:`, response);
+        if (ack) ack({ 
+          success: response?.success || false, 
+          message: response?.message || 'Public key sharing failed'
+        });
+      });
+    }
+  });
+  
+  // Get available relays
+  socket.on('getRelays', (_, ack) => {
+    baseSocket.emit('getRelays', {}, (relays) => {
+      if (ack) ack(relays);
+    });
   });
 });
 

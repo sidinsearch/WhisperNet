@@ -18,6 +18,21 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+// Add message receiving endpoint
+app.post('/message', express.json(), (req, res) => {
+  const message = req.body;
+  
+  // Validate required fields
+  if (!message || !message.to || !message.from || !message.content) {
+    return res.status(400).json({ error: 'Invalid message format' });
+  }
+  
+  // Route the message to recipient
+  io.to(userRegistry[message.to]?.socketId).emit('message', message);
+  
+  res.status(200).json({ status: 'Message received' });
+});
+
 const server = http.createServer(app);
 const io = new Server(server, { 
   cors: { 
@@ -27,16 +42,35 @@ const io = new Server(server, {
   } 
 });
 
-// Enhanced user registry with online status tracking
-const userRegistry = {}; // username -> { relayId, deviceId, online, socketId }
-const relaySockets = {}; // relayId -> { socket, status, lastHeartbeat, socketId }
+// Enhanced user registry with online status tracking and device fingerprinting
+const userRegistry = {}; // username -> { relayId, deviceId, online, socketId, knownDevices: [] }
+const relaySockets = {}; // relayId -> { socket, status, lastHeartbeat, socketId, ip, port }
 const directClients = {}; // socketId -> { username, deviceId } for clients connecting directly to base
+
+// Storage for offline messages
+const offlineMessages = {}; // username -> [messages]
 
 console.log('Base node initializing...');
 
-// Heartbeat interval to check relay server status
+// Helper function to clean up expired offline messages
+const cleanupExpiredMessages = () => {
+  const now = Date.now();
+  for (const username in offlineMessages) {
+    if (offlineMessages[username] && offlineMessages[username].length > 0) {
+      const validMessages = offlineMessages[username].filter(msg => now < msg.ttl);
+      if (validMessages.length !== offlineMessages[username].length) {
+        console.log(`Cleaned up ${offlineMessages[username].length - validMessages.length} expired messages for ${username}`);
+        offlineMessages[username] = validMessages;
+      }
+    }
+  }
+};
+
+// Heartbeat interval to check relay server status and cleanup expired messages
 const heartbeatInterval = setInterval(() => {
   const now = Date.now();
+  
+  // Check relay server status
   for (const relayId in relaySockets) {
     const relay = relaySockets[relayId];
     if (now - relay.lastHeartbeat > 35000) { // 35 seconds timeout
@@ -49,41 +83,41 @@ const heartbeatInterval = setInterval(() => {
           userRegistry[username].online = false;
         }
       }
-      
-      // Notify all clients about relay status change
-      io.emit('relayStatusUpdate', { relayId, status: 'offline' });
     }
   }
+  
+  // Clean up expired messages
+  cleanupExpiredMessages();
 }, 15000); // Check every 15 seconds
 
 io.on('connection', (socket) => {
   console.log(`New connection: ${socket.id}`);
-
+  
   // Handle relay server registration
   socket.on('registerRelay', (data, ack) => {
     console.log('Relay registration attempt:', data);
     
-    let relayId;
-    if (data && data.ip && data.port) {
-      relayId = `${data.ip}:${data.port}`;
-    } else {
-      // Fallback: use socket ID if no IP/port provided
-      relayId = `relay-${socket.id}`;
-    }
-    
+    let relayId = `${data.ip}:${data.port}`;
     relaySockets[relayId] = { 
       socket, 
-      socketId: socket.id,
-      status: 'online',
-      lastHeartbeat: Date.now(),
-      ip: data?.ip || 'unknown',
-      port: data?.port || 'unknown'
+      status: 'online', 
+      lastHeartbeat: Date.now(), 
+      socketId: socket.id, 
+      ip: data.ip, 
+      port: data.port,
+      capabilities: data.capabilities || { offlineRelay: false, encryption: false }
     };
     
-    console.log(`Relay registered: ${relayId}`);
+    console.log(`Relay registered: ${relayId} with capabilities:`, relaySockets[relayId].capabilities);
     
-    // Notify all clients about new relay
-    io.emit('relayStatusUpdate', { relayId, status: 'online' });
+    // Notify all clients about the new relay
+    io.emit('relayStatusUpdate', { 
+      relayId, 
+      status: 'online', 
+      ip: data.ip, 
+      port: data.port,
+      capabilities: relaySockets[relayId].capabilities
+    });
     
     if (ack) ack({ success: true, relayId });
   });
@@ -109,50 +143,222 @@ io.on('connection', (socket) => {
     
     if (ack) ack({ success: true, relayId });
   });
+  
+  // Get available relay servers
+  socket.on('getRelays', (_, ack) => {
+    const availableRelays = Object.entries(relaySockets)
+      .filter(([_, relay]) => relay.status === 'online')
+      .map(([relayId, relay]) => ({ 
+        relayId, 
+        status: relay.status,
+        ip: relay.ip,
+        port: relay.port,
+        capabilities: relay.capabilities || { offlineRelay: false, encryption: false }
+      }));
+    
+    if (ack) ack(availableRelays);
+  });
+  
+  // Helper function to send relay list to a specific socket
+  const sendRelayListToSocket = (targetSocket) => {
+    const relays = Object.entries(relaySockets)
+      .filter(([_, relay]) => relay.status === 'online')
+      .map(([relayId, relay]) => ({ 
+        relayId, 
+        status: relay.status,
+        ip: relay.ip,
+        port: relay.port,
+        capabilities: relay.capabilities || { offlineRelay: false, encryption: false }
+      }));
+    
+    targetSocket.emit('relayList', relays);
+  };
 
-  // Check if user exists
+  // Check if user exists with device fingerprinting
   socket.on('checkUser', ({ username }, ack) => {
-    const user = userRegistry[username];
-    const response = { 
-      exists: !!user, 
-      online: user?.online || false 
-    };
-    console.log(`User check for ${username}:`, response);
-    if (ack) ack(response);
+    const exists = !!userRegistry[username];
+    const online = exists && userRegistry[username].online;
+    console.log(`User check: ${username} exists=${exists} online=${online}`);
+    if (ack) ack({ exists, online });
+  });
+  
+  // Handle checking if a username is available for registration
+  socket.on('checkUsernameAvailable', ({ username }, ack) => {
+    const exists = !!userRegistry[username];
+    console.log(`Username availability check: ${username} available=${!exists}`);
+    if (ack) ack({ available: !exists });
   });
 
-  // Handle user registration (can be from relay or direct client)
-  socket.on('registerUser', ({ username, deviceId, relayId }, ack) => {
-    console.log(`User registration: ${username}, deviceId: ${deviceId}, relayId: ${relayId}`);
+  // Handle message delivery confirmation
+  socket.on('confirmMessageDelivery', ({ messageId, to }, ack) => {
+    // If there are offline messages for this user, remove the delivered message
+    if (offlineMessages[to]) {
+      const index = offlineMessages[to].findIndex(msg => msg.id === messageId);
+      if (index !== -1) {
+        offlineMessages[to].splice(index, 1);
+        console.log(`Message ${messageId} confirmed delivered to ${to}`);
+        if (ack) ack({ success: true });
+      } else {
+        if (ack) ack({ success: false, message: 'Message not found' });
+      }
+    } else {
+      if (ack) ack({ success: false, message: 'No offline messages for user' });
+    }
+  });
+  
+  // Handle relay message bouncing
+  socket.on('bounceMessage', (message, ack) => {
+    // Increment bounce count
+    message.bounceCount = (message.bounceCount || 0) + 1;
     
-    // Check if username is already taken by a different device
-    if (userRegistry[username] && 
-        userRegistry[username].deviceId !== deviceId && 
-        userRegistry[username].online) {
-      console.log(`Username ${username} already taken by different device`);
-      if (ack) ack({ success: false, reason: 'Username already taken by another device' });
+    // Check if message has expired or reached max bounces
+    if (Date.now() > message.ttl || message.bounceCount > message.maxBounces) {
+      console.log(`Message ${message.id} expired or reached max bounces`);
+      if (ack) ack({ success: false, message: 'Message expired or reached max bounces' });
       return;
     }
     
-    // Determine relay ID - could be from a relay server or direct connection
-    const finalRelayId = relayId || `direct-${socket.id}`;
+    // Try to deliver the message
+    if (userRegistry[message.to] && userRegistry[message.to].online) {
+      // User is online, deliver the message
+      this.emit('sendMessage', {
+        to: message.to,
+        message: message.content,
+        deviceId: message.fromDeviceId,
+        id: message.id,
+        encrypted: message.encrypted,
+        encryptedContent: message.encryptedContent,
+        iv: message.iv,
+        ttl: message.ttl
+      }, (response) => {
+        if (ack) ack(response);
+      });
+    } else {
+      // Store for offline delivery
+      if (!offlineMessages[message.to]) {
+        offlineMessages[message.to] = [];
+      }
+      offlineMessages[message.to].push(message);
+      console.log(`Bounced message stored for offline delivery to ${message.to}`);
+      if (ack) ack({ success: true, message: 'Message stored for offline delivery' });
+    }
+  });
+
+  // Clean up offline users after a certain period of inactivity
+const cleanupOfflineUsers = () => {
+  const now = Date.now();
+  const OFFLINE_TIMEOUT = 3600000; // 1 hour in milliseconds
+  
+  Object.keys(userRegistry).forEach(username => {
+    if (!userRegistry[username].online && userRegistry[username].lastSeen) {
+      const timeSinceLastSeen = now - userRegistry[username].lastSeen;
+      if (timeSinceLastSeen > OFFLINE_TIMEOUT) {
+        console.log(`Cleaning up inactive user: ${username}`);
+        delete userRegistry[username];
+      }
+    }
+  });
+};
+
+// Run cleanup every hour
+setInterval(cleanupOfflineUsers, 3600000);
+
+// Handle user registration (can be from relay or direct client)
+  socket.on('registerUser', ({ username, deviceId, publicKey }, ack) => {
+    console.log(`User registration: ${username} with device ${deviceId}`);
     
-    userRegistry[username] = { 
-      relayId: finalRelayId,
-      deviceId, 
-      online: true,
-      socketId: socket.id
-    };
-    
-    // If it's a direct connection, track it
-    if (!relayId) {
-      directClients[socket.id] = { username, deviceId };
+    // Check if username is already registered and online
+    if (userRegistry[username] && userRegistry[username].online) {
+      // If it's the same device, allow reconnection
+      if (userRegistry[username].deviceId === deviceId) {
+        console.log(`User ${username} reconnecting with same device`);
+      } else {
+        console.log(`Username ${username} is already in use by a different device`);
+        if (ack) ack({ success: false, message: 'Username is already in use by a different device' });
+        return;
+      }
     }
     
+    // Check if this is a known device for this username
+    const isNewDevice = !userRegistry[username] || 
+                       !userRegistry[username].knownDevices || 
+                       !userRegistry[username].knownDevices.includes(deviceId);
+    
+    // Register or update the user
+    if (!userRegistry[username]) {
+      userRegistry[username] = { 
+        relayId: 'direct', 
+        deviceId, 
+        online: true, 
+        socketId: socket.id,
+        knownDevices: [deviceId],
+        publicKey
+      };
+    } else {
+      // Update existing user
+      userRegistry[username].relayId = 'direct';
+      userRegistry[username].deviceId = deviceId;
+      userRegistry[username].online = true;
+      userRegistry[username].socketId = socket.id;
+      userRegistry[username].publicKey = publicKey || userRegistry[username].publicKey;
+      
+      // Add to known devices if new
+      if (isNewDevice && userRegistry[username].knownDevices) {
+        userRegistry[username].knownDevices.push(deviceId);
+      } else if (isNewDevice) {
+        userRegistry[username].knownDevices = [deviceId];
+      }
+    }
+    
+    directClients[socket.id] = { username, deviceId };
+    
     console.log(`User ${username} registered successfully`);
-    if (ack) ack({ success: true });
+    
+    // Send available relays to the client
+    const availableRelays = Object.entries(relaySockets)
+      .filter(([_, relay]) => relay.status === 'online')
+      .map(([relayId, relay]) => ({ 
+        relayId, 
+        status: relay.status,
+        ip: relay.ip,
+        port: relay.port
+      }));
+    
+    // Check if there are any offline messages for this user
+    const pendingMessages = offlineMessages[username] || [];
+    
+    if (ack) ack({ 
+      success: true, 
+      message: 'Registration successful',
+      relays: availableRelays,
+      isNewDevice: isNewDevice,
+      pendingMessages: pendingMessages.length > 0 ? pendingMessages : null
+    });
+    
+    // If there are pending messages, deliver them
+    if (pendingMessages.length > 0) {
+      console.log(`Delivering ${pendingMessages.length} offline messages to ${username}`);
+      
+      // Deliver each message
+      pendingMessages.forEach(msg => {
+        socket.emit('receiveMessage', {
+          id: msg.id,
+          from: msg.from,
+          message: msg.content,
+          encrypted: msg.encrypted,
+          encryptedContent: msg.encryptedContent,
+          iv: msg.iv,
+          fromDeviceId: msg.fromDeviceId,
+          timestamp: msg.timestamp,
+          isOfflineMessage: true
+        });
+      });
+      
+      // Clear the offline messages for this user
+      delete offlineMessages[username];
+    }
   });
-  
+
   // Handle message routing
   socket.on('routeMessage', ({ from, to, message, deviceId }, ack) => {
     console.log(`Routing message from ${from} to ${to}`);
@@ -197,6 +403,7 @@ io.on('connection', (socket) => {
 
   // Handle direct client messaging (when base node acts as relay)
   socket.on('sendMessage', ({ to, message, deviceId }, ack) => {
+    console.log(`Direct message request from socket ${socket.id} to ${to}`);
     const fromUser = directClients[socket.id];
     if (!fromUser) {
       if (ack) ack({ delivered: false, reason: 'Not registered' });
@@ -236,29 +443,37 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log(`Connection ${socket.id} disconnected`);
     
-    // Clean up user registry
-    for (const username in userRegistry) {
-      if (userRegistry[username].socketId === socket.id) {
+    // Handle user disconnect
+    if (directClients[socket.id]) {
+      const { username } = directClients[socket.id];
+      console.log(`User ${username} disconnected`);
+      
+      if (userRegistry[username]) {
         userRegistry[username].online = false;
+        userRegistry[username].lastSeen = Date.now(); // Track when user went offline
         console.log(`User ${username} marked as offline`);
       }
-    }
-    
-    // Clean up direct clients
-    if (directClients[socket.id]) {
+      
+      // Notify other users about status change
+      io.emit('userStatus', { username, status: 'offline' });
+      
+      // Remove from direct clients
       delete directClients[socket.id];
     }
     
-    // Clean up relay sockets
+    // Handle relay disconnect
     for (const relayId in relaySockets) {
       if (relaySockets[relayId].socketId === socket.id) {
         console.log(`Relay ${relayId} disconnected`);
-        delete relaySockets[relayId];
+        relaySockets[relayId].status = 'offline';
+        relaySockets[relayId].lastSeen = Date.now();
         
         // Mark users on this relay as offline
         for (const username in userRegistry) {
           if (userRegistry[username].relayId === relayId) {
             userRegistry[username].online = false;
+            userRegistry[username].lastSeen = Date.now();
+            console.log(`User ${username} marked as offline`);
           }
         }
         
