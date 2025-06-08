@@ -3,7 +3,19 @@ import io from 'socket.io-client';
 import axios from 'axios';
 import FingerprintJS from '@fingerprintjs/fingerprintjs';
 
+// Import components
+import ConnectionInfo from './components/ConnectionInfo';
+import SecurityAlert from './components/SecurityAlert';
+import LoginScreen from './components/LoginScreen';
+import ChatInterface from './components/ChatInterface';
+import AboutPage from './components/AboutPage';
+
 const BASE_NODE_URL = process.env.REACT_APP_BASE_NODE_URL || "http://localhost:5000";
+
+// Storage keys
+const IDENTITY_STORAGE_KEY = 'whispernetKnownIdentities';
+const CHAT_HISTORY_KEY = 'whispernetChatHistory';
+const TRUST_STATUS_KEY = 'whispernetTrustStatus';
 
 // Encryption utilities
 const generateKeyPair = async () => {
@@ -44,7 +56,7 @@ const encryptMessage = async (message, publicKeyJwk) => {
       ["encrypt"]
     );
     
-    // Convert the message to ArrayBuffer
+    // Convert the message to an ArrayBuffer
     const encoder = new TextEncoder();
     const data = encoder.encode(message);
     
@@ -57,7 +69,7 @@ const encryptMessage = async (message, publicKeyJwk) => {
       data
     );
     
-    // Convert the encrypted data to base64
+    // Convert the encrypted data to a base64 string
     return btoa(String.fromCharCode(...new Uint8Array(encryptedData)));
   } catch (error) {
     console.error('Error encrypting message:', error);
@@ -79,8 +91,12 @@ const decryptMessage = async (encryptedMessage, privateKeyJwk) => {
       ["decrypt"]
     );
     
-    // Convert the base64 encrypted message to ArrayBuffer
-    const encryptedData = Uint8Array.from(atob(encryptedMessage), c => c.charCodeAt(0));
+    // Convert the base64 string to an ArrayBuffer
+    const encryptedData = new Uint8Array(
+      atob(encryptedMessage)
+        .split('')
+        .map(char => char.charCodeAt(0))
+    );
     
     // Decrypt the data
     const decryptedData = await window.crypto.subtle.decrypt(
@@ -91,162 +107,286 @@ const decryptMessage = async (encryptedMessage, privateKeyJwk) => {
       encryptedData
     );
     
-    // Convert the decrypted data to string
+    // Convert the decrypted data to a string
     const decoder = new TextDecoder();
     return decoder.decode(decryptedData);
   } catch (error) {
     console.error('Error decrypting message:', error);
-    return '[Encrypted message - cannot decrypt]';
+    throw error;
   }
 };
 
-// Initialize the fingerprint agent
-const fpPromise = FingerprintJS.load();
-
 function App() {
-  const [username, setUsername] = useState('');
-  const [recipient, setRecipient] = useState('');
-  const [message, setMessage] = useState('');
-  const [messages, setMessages] = useState([]);
+  // Connection state
   const [connected, setConnected] = useState(false);
-  const [status, setStatus] = useState('Checking relay status...');
+  const [username, setUsername] = useState('');
   const [deviceId, setDeviceId] = useState('');
+  const [status, setStatus] = useState('Initializing...');
+  const [relayStatus, setRelayStatus] = useState('checking');
+  const [relayServerUrl, setRelayServerUrl] = useState('');
   const [connectionDetails, setConnectionDetails] = useState({});
   const [showConnectionInfo, setShowConnectionInfo] = useState(false);
   const [securityAlert, setSecurityAlert] = useState(null);
+  
+  // Message state
+  const [recipient, setRecipient] = useState('');
+  const [message, setMessage] = useState('');
+  const [messages, setMessages] = useState([]);
   const [typing, setTyping] = useState(false);
-  const [relayServerUrl, setRelayServerUrl] = useState('Unknown');
-  const [relayStatus, setRelayStatus] = useState('checking');
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [recipientStatus, setRecipientStatus] = useState({ exists: false, online: false });
   const [isCheckingUsername, setIsCheckingUsername] = useState(false);
   const [usernameAvailable, setUsernameAvailable] = useState(true);
+  
+  // Encryption state
   const [keyPair, setKeyPair] = useState(null);
-  const [publicKeys, setPublicKeys] = useState({}); // username -> publicKey
+  const [publicKeys, setPublicKeys] = useState({});
   const [encryptionEnabled, setEncryptionEnabled] = useState(true);
   const [encryptionStatus, setEncryptionStatus] = useState('initializing');
+  const [knownIdentities, setKnownIdentities] = useState({}); // username -> {deviceId, publicKey, firstSeen}
+  const [identityMismatch, setIdentityMismatch] = useState(null); // {username, originalDeviceId, newDeviceId, action}
+  const [showIdentityWarning, setShowIdentityWarning] = useState(false);
+  
+  // New state variables for enhanced chat functionality
+  const [chatHistory, setChatHistory] = useState({}); // username -> array of messages
+  const [contacts, setContacts] = useState([]); // list of usernames the current user has chatted with
+  const [activeChat, setActiveChat] = useState(null); // currently selected chat
+  const [trustStatus, setTrustStatus] = useState({}); // username -> {trusted: boolean, keyExchanged: boolean, mutualMessaging: boolean}
+  const [showTrustWarning, setShowTrustWarning] = useState(false); // whether to show the trust warning for the current chat
+  
+  // UI state variables
+  const [showAboutPage, setShowAboutPage] = useState(false); // whether to show the About page
+  
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const pingIntervalRef = useRef(null);
   const recipientCheckTimeoutRef = useRef(null);
 
-  // Get device fingerprint and initialize encryption on component mount
+  // Load known identities from localStorage
+  const loadKnownIdentities = () => {
+    try {
+      const storedIdentities = localStorage.getItem(IDENTITY_STORAGE_KEY);
+      if (storedIdentities) {
+        setKnownIdentities(JSON.parse(storedIdentities));
+      }
+    } catch (error) {
+      console.error('Error loading known identities:', error);
+    }
+  };
+  
+  // Save known identities to localStorage
+  const saveKnownIdentities = (identities) => {
+    try {
+      localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(identities));
+    } catch (error) {
+      console.error('Error saving known identities:', error);
+    }
+  };
+  
+  // Load chat history from localStorage
+  const loadChatHistory = () => {
+    try {
+      const storedChatHistory = localStorage.getItem(CHAT_HISTORY_KEY);
+      if (storedChatHistory) {
+        const parsedChatHistory = JSON.parse(storedChatHistory);
+        setChatHistory(parsedChatHistory);
+        
+        // Extract contacts from chat history
+        const contactsList = Object.keys(parsedChatHistory);
+        setContacts(contactsList);
+        console.log('Loaded chat history for contacts:', contactsList.length);
+        
+        // If we have contacts but no active chat, set the first contact as active
+        if (contactsList.length > 0 && !activeChat) {
+          setActiveChat(contactsList[0]);
+          setRecipient(contactsList[0]);
+        }
+      }
+    } catch (error) {
+      console.error('Error loading chat history:', error);
+    }
+  };
+  
+  // Save chat history to localStorage
+  const saveChatHistory = (history) => {
+    try {
+      localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history));
+    } catch (error) {
+      console.error('Error saving chat history:', error);
+    }
+  };
+  
+  // Load trust status from localStorage
+  const loadTrustStatus = () => {
+    try {
+      const storedTrustStatus = localStorage.getItem(TRUST_STATUS_KEY);
+      if (storedTrustStatus) {
+        setTrustStatus(JSON.parse(storedTrustStatus));
+      }
+    } catch (error) {
+      console.error('Error loading trust status:', error);
+    }
+  };
+  
+  // Save trust status to localStorage
+  const saveTrustStatus = (status) => {
+    try {
+      localStorage.setItem(TRUST_STATUS_KEY, JSON.stringify(status));
+    } catch (error) {
+      console.error('Error saving trust status:', error);
+    }
+  };
+  
+  // Update chat history for a specific contact
+  const updateChatHistory = (contact, message) => {
+    setChatHistory(prevHistory => {
+      const updatedHistory = { ...prevHistory };
+      
+      // Initialize chat history for this contact if it doesn't exist
+      if (!updatedHistory[contact]) {
+        updatedHistory[contact] = [];
+      }
+      
+      // Add the message to the chat history
+      updatedHistory[contact] = [...updatedHistory[contact], message];
+      
+      // Save the updated chat history
+      saveChatHistory(updatedHistory);
+      
+      // Update contacts list if this is a new contact
+      if (!contacts.includes(contact)) {
+        const updatedContacts = [...contacts, contact];
+        setContacts(updatedContacts);
+      }
+      
+      return updatedHistory;
+    });
+  };
+  
+  // Check and update trust status for a contact
+  const updateTrustStatus = (contact, updates) => {
+    setTrustStatus(prevStatus => {
+      const updatedStatus = { ...prevStatus };
+      
+      // Initialize trust status for this contact if it doesn't exist
+      if (!updatedStatus[contact]) {
+        updatedStatus[contact] = {
+          trusted: false,
+          keyExchanged: false,
+          mutualMessaging: false,
+          sentMessage: false,
+          receivedMessage: false,
+          firstInteraction: new Date().toISOString()
+        };
+      }
+      
+      // Apply updates
+      updatedStatus[contact] = {
+        ...updatedStatus[contact],
+        ...updates
+      };
+      
+      // Check if mutual messaging has occurred
+      if (updatedStatus[contact].sentMessage && updatedStatus[contact].receivedMessage) {
+        updatedStatus[contact].mutualMessaging = true;
+        
+        // If mutual messaging has occurred and we have their public key, mark as trusted and exchange keys
+        if (publicKeys[contact]) {
+          updatedStatus[contact].keyExchanged = true;
+          updatedStatus[contact].trusted = true;
+          
+          // Update the UI to show trust status change
+          if (contact === recipient) {
+            setShowTrustWarning(false);
+          }
+        }
+      } else {
+        // If we don't have mutual messaging yet, make sure to show the warning
+        if (contact === recipient) {
+          setShowTrustWarning(true);
+        }
+      }
+      
+      // Save the updated trust status
+      saveTrustStatus(updatedStatus);
+      
+      return updatedStatus;
+    });
+  };
+
+  // Initialize device fingerprint
   useEffect(() => {
-    const initializeDevice = async () => {
+    const initializeFingerprint = async () => {
       try {
-        // Get device fingerprint
-        const fp = await fpPromise;
+        const fp = await FingerprintJS.load();
         const result = await fp.get();
-        const visitorId = result.visitorId;
-        setDeviceId(visitorId);
-        
-        // Initialize encryption
-        await initializeEncryption(visitorId);
+        const deviceId = result.visitorId;
+        setDeviceId(deviceId);
+        console.log('Device fingerprint:', deviceId);
       } catch (error) {
-        console.error('Failed to initialize device:', error);
-        // Generate a fallback device ID
-        const fallbackId = 'fallback-' + Math.random().toString(36).substr(2, 9);
-        setDeviceId(fallbackId);
-        
-        // Initialize encryption with fallback ID
-        await initializeEncryption(fallbackId);
+        console.error('Error initializing fingerprint:', error);
+        setStatus('Error initializing device fingerprint');
       }
     };
     
-    initializeDevice();
-  }, []);
-  
-  // Initialize encryption
-  const initializeEncryption = async (deviceIdentifier) => {
-    try {
-      setEncryptionStatus('initializing');
-      
-      // Check if we have keys in localStorage
-      const storedKeys = localStorage.getItem(`whispernetKeys_${deviceIdentifier}`);
-      
-      if (storedKeys) {
-        // We have stored keys, check if they're valid
-        try {
-          const parsedKeys = JSON.parse(storedKeys);
-          
-          // Validate the keys by testing encryption/decryption
-          if (parsedKeys.publicKey && parsedKeys.privateKey) {
-            try {
-              // Test encryption with the stored keys
-              const testMessage = "test-encryption-" + Date.now();
-              const encrypted = await encryptMessage(testMessage, parsedKeys.publicKey);
-              const decrypted = await decryptMessage(encrypted, parsedKeys.privateKey);
-              
-              if (decrypted === testMessage) {
-                // Keys are valid
-                setKeyPair(parsedKeys);
-                console.log('Loaded and validated existing encryption keys');
-                setEncryptionStatus('ready');
-              } else {
-                console.warn('Stored keys failed validation test');
-                await generateAndStoreNewKeys(deviceIdentifier);
-              }
-            } catch (testError) {
-              console.error('Error testing stored keys:', testError);
-              await generateAndStoreNewKeys(deviceIdentifier);
-            }
-          } else {
-            console.warn('Stored keys are incomplete');
-            await generateAndStoreNewKeys(deviceIdentifier);
-          }
-        } catch (parseError) {
-          console.error('Error parsing stored keys:', parseError);
-          await generateAndStoreNewKeys(deviceIdentifier);
-        }
-      } else {
-        // No stored keys, generate new ones
-        await generateAndStoreNewKeys(deviceIdentifier);
-      }
-    } catch (error) {
-      console.error('Error initializing encryption:', error);
-      setEncryptionStatus('error');
-      setSecurityAlert({
-        username: 'System',
-        message: 'Failed to initialize encryption. Messages will not be secure.',
-        type: 'error'
-      });
-      setEncryptionEnabled(false);
-    }
-  };
-  
-  // Generate and store new keys
-  const generateAndStoreNewKeys = async (deviceIdentifier) => {
-    try {
-      console.log('Generating new encryption keys...');
-      const newKeyPair = await generateKeyPair();
-      setKeyPair(newKeyPair);
-      
-      // Store keys in localStorage
-      localStorage.setItem(`whispernetKeys_${deviceIdentifier}`, JSON.stringify(newKeyPair));
-      
-      console.log('Generated and stored new encryption keys');
-      setEncryptionStatus('ready');
-    } catch (error) {
-      console.error('Error generating new keys:', error);
-      throw error;
-    }
-  };
-
-  // Check relay status on initial load
-  useEffect(() => {
-    if (deviceId) {
-      checkRelayStatus();
-    }
-  }, [deviceId]);
-
-  // Function to check relay status
-  const checkRelayStatus = async () => {
-    setStatus('Checking base node status...');
-    setRelayStatus('checking');
+    initializeFingerprint();
+    loadKnownIdentities();
+    loadChatHistory();
+    loadTrustStatus();
+    checkRelayStatus();
     
+    // Scroll to bottom when messages change
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+    
+    // Add window unload handler to ensure username is released when browser is closed
+    const handleBeforeUnload = () => {
+      if (socketRef.current && socketRef.current.connected && username) {
+        // Synchronous logout call to ensure it happens before page unload
+        socketRef.current.emit('userLogout', { username, deviceId });
+      }
+    };
+    
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    
+    return () => {
+      // Clean up event listener
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      
+      // Logout and disconnect
+      if (socketRef.current && socketRef.current.connected && username) {
+        socketRef.current.emit('userLogout', { username, deviceId });
+        socketRef.current.disconnect();
+      }
+      
+      clearInterval(pingIntervalRef.current);
+      clearTimeout(recipientCheckTimeoutRef.current);
+      clearTimeout(typingTimeoutRef.current);
+    };
+  }, [username, deviceId]);
+  
+  // Scroll to bottom when messages change
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages]);
+  
+  // Update connection info when connection details change
+  useEffect(() => {
+    if (connected && showConnectionInfo) {
+      // Update connection info
+    }
+  }, [connected, showConnectionInfo, username]);
+
+  const checkRelayStatus = async () => {
+    setRelayStatus('checking');
+    setStatus('Checking base node status...');
+    
+    // Try HTTP health check first
     try {
-      // First try HTTP health check
       const response = await axios.get(`${BASE_NODE_URL}/health`, { 
         timeout: 5000 
       });
@@ -269,22 +409,15 @@ function App() {
       forceNew: true
     });
     
-    const connectionTimeout = setTimeout(() => {
-      setRelayStatus('timeout');
-      setStatus('Connection timeout. Base node may be offline.');
-      tempSocket.disconnect();
-    }, 8000);
-    
     tempSocket.on('connect', () => {
-      clearTimeout(connectionTimeout);
+      console.log('Connected to base node for status check');
       setRelayStatus('online');
       setStatus('Base node online. Please login.');
       tempSocket.disconnect();
     });
     
     tempSocket.on('connect_error', (err) => {
-      clearTimeout(connectionTimeout);
-      console.error('Socket connection error:', err);
+      console.error('Base node connection error:', err);
       setRelayStatus('offline');
       setStatus('Base node offline. Please try again later.');
       tempSocket.disconnect();
@@ -308,190 +441,263 @@ function App() {
     };
   }, [connected, username, deviceId]);
 
-  useEffect(() => {
-    if (connected && socketRef.current) {
-      const fetchRelayInfo = () => {
-        console.log('Fetching relay info...');
+  const handleUsernameSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!username.trim() || !deviceId) {
+      setStatus('Please enter a valid username');
+      return;
+    }
+    
+    if (relayStatus !== 'online') {
+      setStatus('Cannot connect: Base node is offline');
+      return;
+    }
+    
+    try {
+      setStatus('Checking username availability...');
+      setIsCheckingUsername(true);
+      
+      // Skip username check if we're in development mode and the server is not responding
+      let usernameIsAvailable = true;
+      
+      try {
+        // Check if username is available
+        const response = await axios.get(`${BASE_NODE_URL}/check-username/${username}`, {
+          timeout: 5000
+        });
         
-        // First try to get relay info directly from the socket
-        socketRef.current.emit('getRelayInfo', {}, (info) => {
-          if (info && info.relayId) {
-            console.log('Received relay info from socket:', info);
-            // Update relay server information
-            setRelayServerUrl(info.relayId);
-            setConnectionDetails(prev => ({ 
-              ...prev, 
-              relayId: info.relayId,
-              relayStatus: info.status || 'connected',
-              connectedUsers: info.connectedUsers,
-              ip: info.ip,
-              port: info.port
-            }));
-            
-            // Show connection info automatically on first connect
-            if (!showConnectionInfo) {
-              setShowConnectionInfo(true);
-              
-              // Auto-hide after 5 seconds
-              setTimeout(() => {
-                setShowConnectionInfo(false);
-              }, 5000);
-            }
-          } else {
-            console.warn('No relay info received from socket, checking with base node');
-            
-            // If we're connected to the base node, try to get our relay assignment
-            socketRef.current.emit('getMyRelayInfo', { username }, (relayInfo) => {
-              if (relayInfo && relayInfo.success && relayInfo.relayId) {
-                console.log('Received relay assignment from base node:', relayInfo);
-                
-                if (relayInfo.isDirect) {
-                  // We're directly connected to the base node
-                  setRelayServerUrl('Direct to Base Node');
-                  setConnectionDetails(prev => ({ 
-                    ...prev, 
-                    relayId: 'direct',
-                    relayStatus: 'direct_to_base',
-                  }));
-                } else {
-                  // We're assigned to a relay
-                  setRelayServerUrl(relayInfo.relayId);
-                  setConnectionDetails(prev => ({ 
-                    ...prev, 
-                    relayId: relayInfo.relayId,
-                    relayStatus: 'assigned_by_base',
-                  }));
-                }
-              } else {
-                console.warn('No relay assignment from base node, assuming direct connection');
-                
-                // If we can't get relay info, we're probably directly connected to the base node
-                const socketId = socketRef.current.id;
-                setRelayServerUrl(`Direct (${socketId.substring(0, 8)}...)`);
-                setConnectionDetails(prev => ({ 
-                  ...prev, 
-                  relayId: 'direct',
-                  relayStatus: 'direct_to_base',
-                }));
-              }
+        usernameIsAvailable = response.data.available;
+      } catch (checkError) {
+        console.warn('Username check failed, proceeding anyway:', checkError);
+        // In case of error, we'll assume the username is available
+        // This allows development without the backend running
+      }
+      
+      setIsCheckingUsername(false);
+      
+      if (usernameIsAvailable) {
+        console.log('Username is available');
+        setUsernameAvailable(true);
+        
+        // Generate encryption keys if needed
+        if (!keyPair) {
+          setStatus('Generating encryption keys...');
+          try {
+            const newKeyPair = await generateKeyPair();
+            setKeyPair(newKeyPair);
+            setEncryptionStatus('ready');
+            console.log('Encryption keys generated successfully');
+          } catch (error) {
+            console.error('Failed to generate encryption keys:', error);
+            setEncryptionStatus('failed');
+            setSecurityAlert({
+              username: 'System',
+              message: 'Failed to generate encryption keys. Messages will not be encrypted.',
+              type: 'error'
             });
           }
-        });
-      };
+        }
+        
+        setConnected(true);
+        setStatus('Connecting to network...');
+      } else {
+        console.log('Username is already taken');
+        setUsernameAvailable(false);
+        setStatus('Username is already taken. Please choose another.');
+      }
+    } catch (error) {
+      console.error('Error in username submission process:', error);
+      setIsCheckingUsername(false);
       
-      // Get relay info immediately and then every 10 seconds
-      fetchRelayInfo();
-      const relayInfoInterval = setInterval(fetchRelayInfo, 10000);
-      
-      return () => clearInterval(relayInfoInterval);
+      // Allow login anyway in case of errors
+      setUsernameAvailable(true);
+      setConnected(true);
+      setStatus('Connecting to network (username check bypassed)...');
     }
-  }, [connected, showConnectionInfo, username]);
+  };
+
+  const handleUsernameChange = (e) => {
+    const newUsername = e.target.value.trim();
+    setUsername(newUsername);
+    
+    // Reset availability check when username changes
+    setUsernameAvailable(true);
+    
+    // Check username availability after a short delay
+    if (newUsername.length > 2) {
+      setIsCheckingUsername(true);
+      clearTimeout(window.usernameCheckTimeout);
+      
+      window.usernameCheckTimeout = setTimeout(async () => {
+        try {
+          const response = await axios.get(`${BASE_NODE_URL}/check-username/${newUsername}`, {
+            timeout: 5000
+          });
+          
+          setIsCheckingUsername(false);
+          setUsernameAvailable(response.data.available);
+        } catch (error) {
+          console.warn('Error checking username availability:', error);
+          // In case of error, assume username is available to allow development without backend
+          setIsCheckingUsername(false);
+          setUsernameAvailable(true);
+        }
+      }, 500);
+    } else {
+      setIsCheckingUsername(false);
+    }
+  };
+
+  const handleDisconnect = () => {
+    if (socketRef.current) {
+      // Explicitly notify the server that we're logging out
+      socketRef.current.emit('userLogout', { username, deviceId }, (response) => {
+        console.log('Logout response:', response);
+        // Disconnect after logging out
+        socketRef.current.disconnect();
+      });
+      
+      // Set a timeout to force disconnect in case the server doesn't respond
+      setTimeout(() => {
+        if (socketRef.current && socketRef.current.connected) {
+          socketRef.current.disconnect();
+        }
+      }, 1000);
+    }
+    
+    setConnected(false);
+    setUsername('');
+    setMessages([]);
+    setStatus('Disconnected');
+    clearInterval(pingIntervalRef.current);
+    clearTimeout(recipientCheckTimeoutRef.current);
+    clearTimeout(typingTimeoutRef.current);
+  };
 
   const connectToBaseNode = () => {
     // Clear any previous connection
     if (socketRef.current) {
-      socketRef.current.disconnect();
+      // First try to logout to release the username
+      if (socketRef.current.connected) {
+        console.log(`Logging out user ${username} to release username before reconnection`);
+        socketRef.current.emit('userLogout', { username, deviceId }, () => {
+          console.log('Logout acknowledged by server, disconnecting socket');
+          socketRef.current.disconnect();
+          proceedWithBaseNodeConnection();
+        });
+        
+        // Set a timeout in case the server doesn't respond
+        setTimeout(() => {
+          if (socketRef.current && socketRef.current.connected) {
+            console.log('Logout response timeout, forcing disconnect');
+            socketRef.current.disconnect();
+            proceedWithBaseNodeConnection();
+          }
+        }, 1000);
+      } else {
+        socketRef.current.disconnect();
+        proceedWithBaseNodeConnection();
+      }
+    } else {
+      proceedWithBaseNodeConnection();
     }
     
-    // Always connect to base node first for handshake and relay discovery
-    console.log('Connecting to base node for initial handshake:', BASE_NODE_URL);
-    setStatus('Connecting to base node for handshake...');
-    
-    // Connect to base node
-    socketRef.current = io(BASE_NODE_URL, {
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 5,
-      reconnectionDelay: 2000,
-      query: { 
-        deviceId,
-        username 
-      },
-      forceNew: true
-    });
-    
-    // Connection event handlers
-    socketRef.current.on('connect', () => {
-      console.log('Connected to base node with socket ID:', socketRef.current.id);
-      setStatus('Connected to base node for handshake');
-      setRelayStatus('online');
+    function proceedWithBaseNodeConnection() {
+      // Always connect to base node first for handshake and relay discovery
+      console.log('Connecting to base node for initial handshake:', BASE_NODE_URL);
+      setStatus('Connecting to base node for handshake...');
       
-      // When connecting to the base node, set the relay information accordingly
-      setRelayServerUrl(`Base Node (Handshake)`);
-      setConnectionDetails({
-        socketId: socketRef.current.id,
-        transport: socketRef.current.io.engine.transport.name,
-        baseNodeUrl: BASE_NODE_URL,
-        relayId: 'base_handshake',
-        relayStatus: 'handshake'
+      socketRef.current = io(BASE_NODE_URL, {
+        transports: ['websocket', 'polling'],
+        reconnectionAttempts: 3,
+        reconnectionDelay: 1000,
+        query: { 
+          username,
+          deviceId,
+          publicKey: keyPair?.publicKey ? JSON.stringify(keyPair.publicKey) : null,
+          timestamp: Date.now() // Add timestamp to prevent caching issues
+        },
+        auth: {
+          username,
+          deviceId,
+          timestamp: Date.now() // Add timestamp to prevent caching issues
+        },
+        forceNew: true
       });
       
-      // Get available relays first
-      socketRef.current.emit('getAvailableRelays', {}, (response) => {
-        console.log('Available relays:', response);
+      // Connection event handlers
+      socketRef.current.on('connect', () => {
+        console.log('Connected to base node with socket ID:', socketRef.current.id);
+        setStatus('Connected to base node for handshake');
+        setRelayStatus('online');
         
-        if (response && response.relays && response.relays.length > 0) {
-          // Cache relay information
-          localStorage.setItem('whispernetRelayCache', JSON.stringify({
-            timestamp: Date.now(),
-            relays: response.relays
-          }));
+        // When connecting to the base node, set the relay information accordingly
+        setConnectionDetails({
+          socketId: socketRef.current.id,
+          transport: socketRef.current.io.engine.transport.name,
+          baseNodeUrl: BASE_NODE_URL,
+          relayId: 'base_handshake',
+          relayStatus: 'handshake'
+        });
+        
+        setRelayServerUrl('Base Node (Handshake)');
+        
+        // Register with the base node
+        socketRef.current.emit('registerUser', { 
+          username, 
+          deviceId,
+          publicKey: keyPair?.publicKey,
+          timestamp: Date.now() // Add timestamp to ensure fresh registration
+        }, (response) => {
+          console.log('Registration response:', response);
           
-          // Register with base node temporarily
-          registerWithBaseNode(() => {
-            // After successful registration, connect to a relay
-            connectToRelay(response.relays);
-          });
-        } else {
-          // No relays available, register directly with base node
-          registerWithBaseNode(() => {
-            // Set UI to indicate we're using base node as fallback
-            setRelayServerUrl('Base Node (Fallback)');
-            setConnectionDetails(prev => ({
-              ...prev,
-              relayId: 'direct',
-              relayStatus: 'direct_to_base'
-            }));
-            setStatus('Using Base Node as fallback (no relays available)');
+          if (response && response.success) {
+            console.log(`User ${username} registered successfully with base node`);
+            setStatus('Registered successfully with base node');
             
-            // Start polling for available relays
-            startRelayPolling();
-          });
-        }
-      });
-    });
-    
-    const registerWithBaseNode = (callback) => {
-      // Register with base node
-      socketRef.current.emit('registerUser', { 
-        username, 
-        deviceId 
-      }, (response) => {
-        console.log('Registration response:', response);
-        if (response && response.success) {
-          setStatus('Registered successfully with base node');
-          
-          // Set up socket event handlers
-          connectSocketEvents();
-          
-          // Get initial data
-          getOnlineUsers();
-          startPingInterval();
-          
-          // Execute callback if provided
-          if (callback && typeof callback === 'function') {
-            callback();
+            // Connect socket events
+            connectSocketEvents();
+            
+            // Start ping interval
+            startPingInterval();
+            
+            // Get available relays first
+            socketRef.current.emit('getAvailableRelays', {}, (response) => {
+              console.log('Available relays:', response);
+              
+              if (response && response.relays && response.relays.length > 0) {
+                // Cache relay information
+                localStorage.setItem('whispernetRelayCache', JSON.stringify({
+                  timestamp: Date.now(),
+                  relays: response.relays
+                }));
+                
+                // Connect to the first available relay
+                connectToRelay(response.relays);
+              } else {
+                console.log('No relays available, using base node');
+                setStatus('No relay servers available, using base node');
+                
+                // Update connection details for direct base node connection
+                setRelayServerUrl('Base Node (Fallback)');
+                setConnectionDetails(prev => ({
+                  ...prev,
+                  relayId: 'direct',
+                  relayStatus: 'direct_to_base'
+                }));
+                
+                // Start polling for available relays
+                startRelayPolling();
+              }
+            });
+          } else {
+            console.error('Registration failed:', response?.reason || 'Unknown error');
+            setStatus(`Registration failed: ${response?.reason || 'Unknown error'}`);
           }
-        } else {
-          const errorMsg = response?.reason || 'Registration failed';
-          setStatus(`Registration failed: ${errorMsg}`);
-          setSecurityAlert({
-            username: 'System',
-            message: `Registration failed: ${errorMsg}`,
-            type: 'error'
-          });
-        }
+        });
       });
-    };
+    }
     
     socketRef.current.on('connect_error', (err) => {
       console.error('Base node connection error:', err);
@@ -499,25 +705,23 @@ function App() {
       setRelayStatus('offline');
       
       // Try to use cached relays if available
-      const cachedRelayInfo = localStorage.getItem('whispernetRelayCache');
-      let cachedRelays = [];
-      
-      if (cachedRelayInfo) {
-        try {
-          const parsedCache = JSON.parse(cachedRelayInfo);
-          if (parsedCache.timestamp && (Date.now() - parsedCache.timestamp < 3600000)) { // Cache valid for 1 hour
-            cachedRelays = parsedCache.relays || [];
-            console.log('Using cached relay information:', cachedRelays);
+      try {
+        const cachedRelayInfo = localStorage.getItem('whispernetRelayCache');
+        if (cachedRelayInfo) {
+          const relayInfo = JSON.parse(cachedRelayInfo);
+          const cacheAge = Date.now() - relayInfo.timestamp;
+          
+          // Use cache if it's less than 1 hour old
+          if (cacheAge < 3600000 && relayInfo.relays && relayInfo.relays.length > 0) {
+            console.log('Using cached relay information');
             
-            if (cachedRelays.length > 0) {
-              setTimeout(() => {
-                connectToRelay(cachedRelays);
-              }, 1000);
-            }
+            // Try to connect to the first cached relay
+            connectToRelay(relayInfo.relays[0]);
+            return;
           }
-        } catch (error) {
-          console.error('Error parsing cached relay info:', error);
         }
+      } catch (error) {
+        console.error('Error parsing cached relay info:', error);
       }
     });
     
@@ -527,17 +731,18 @@ function App() {
       
       // Don't auto-reconnect if user manually disconnected
       if (reason !== 'io client disconnect' && connected) {
+        setStatus('Reconnecting...');
+        
+        // Try to reconnect after a delay
         setTimeout(() => {
           if (connected) {
-            // Try to reconnect to base node first
             connectToBaseNode();
           }
         }, 3000);
       }
     });
   };
-  
-  // Function to connect to a relay server
+
   const connectToRelay = (relays) => {
     if (!relays || !relays.length) {
       console.log('No relays available to connect to');
@@ -546,10 +751,15 @@ function App() {
     
     // Use the first available relay
     const relay = relays[0];
-    const relayUrl = relay.id.startsWith('http') ? relay.id : `http://${relay.id}`;
+    const relayUrl = relay.url || (relay.id && (relay.id.startsWith('http') ? relay.id : `http://${relay.id}`));
+    
+    if (!relayUrl) {
+      console.error('Invalid relay information');
+      return;
+    }
     
     console.log(`Switching to relay server: ${relayUrl}`);
-    setStatus(`Connecting to relay server: ${relay.id}...`);
+    setStatus(`Connecting to relay server: ${relay.id || relayUrl}...`);
     
     // Disconnect from base node first
     if (socketRef.current) {
@@ -561,6 +771,11 @@ function App() {
         transports: ['websocket', 'polling'],
         reconnectionAttempts: 3,
         reconnectionDelay: 2000,
+        query: { 
+          username,
+          deviceId,
+          publicKey: keyPair?.publicKey ? JSON.stringify(keyPair.publicKey) : null
+        },
         forceNew: true
       });
       
@@ -589,26 +804,33 @@ function App() {
         // Register with the relay
         socketRef.current.emit('register', { 
           username, 
-          deviceId 
+          deviceId,
+          publicKey: keyPair?.publicKey
         }, (response) => {
           if (response && response.success) {
             console.log('Successfully registered with relay');
             
             // Now we can safely disconnect from the base node
-            oldSocket.disconnect();
+            oldSocket.emit('userLogout', { username, deviceId }, () => {
+              console.log('Logged out from base node after connecting to relay');
+              oldSocket.disconnect();
+            });
             
-            setStatus(`Connected to relay server: ${relay.id}`);
-            setRelayServerUrl(relay.id);
+            setStatus(`Connected to relay server: ${relay.id || relayUrl}`);
+            setRelayServerUrl(relay.id || relayUrl);
             setConnectionDetails(prev => ({
               ...prev,
-              relayId: relay.id,
+              relayId: relay.id || relayUrl,
               socketId: socketRef.current.id,
               transport: socketRef.current.io.engine.transport.name,
-              relayStatus: 'connected_to_relay'
+              relayStatus: 'connected_to_relay',
+              ip: relay.ip,
+              port: relay.port,
+              connectedUsers: relay.connectedUsers
             }));
             
-            // Set up socket event handlers
-            connectSocketEvents();
+            // Set up socket event handlers for the relay connection
+            setupRelaySocketEvents();
             
             // Start ping interval
             startPingInterval();
@@ -647,7 +869,7 @@ function App() {
         // Stay with base node
         socketRef.current = oldSocket;
         
-        setStatus('Using Base Node (relay connection error)');
+        setStatus('Using Base Node (relay connection failed)');
         setRelayServerUrl('Base Node (Fallback)');
         setConnectionDetails(prev => ({
           ...prev,
@@ -667,17 +889,140 @@ function App() {
           setStatus(`Disconnected from relay: ${reason}`);
           
           // Try to reconnect to base node
-          setTimeout(() => {
-            if (connected) {
-              connectToBaseNode();
-            }
-          }, 1000);
+          connectToBaseNode();
         }
       });
     }
   };
   
-  // Function to periodically poll for available relays when using base node as fallback
+  // Set up socket event handlers specifically for relay connections
+  const setupRelaySocketEvents = () => {
+    if (!socketRef.current) return;
+    
+    // Remove any existing listeners to prevent duplicates
+    socketRef.current.off('receiveMessage');
+    socketRef.current.off('userTyping');
+    socketRef.current.off('userStatusUpdate');
+    socketRef.current.off('publicKeyRequest');
+    
+    // Handle incoming messages
+    socketRef.current.on('receiveMessage', async (data) => {
+      console.log(`Received message from ${data.from}`);
+      
+      // Process the message
+      let messageContent = data.message;
+      let isEncrypted = data.encrypted;
+      
+      // Decrypt message if it's encrypted and we have the keys
+      if (isEncrypted && keyPair && keyPair.privateKey) {
+        try {
+          messageContent = await decryptMessage(data.message, keyPair.privateKey);
+          console.log('Message decrypted successfully');
+        } catch (error) {
+          console.error('Failed to decrypt message:', error);
+          messageContent = '[Encrypted message - decryption failed]';
+        }
+      }
+      
+      // Create message object
+      const newMessage = {
+        id: Date.now().toString(),
+        from: data.from,
+        content: messageContent,
+        timestamp: data.timestamp || new Date().toISOString(),
+        encrypted: isEncrypted,
+        fromDeviceId: data.fromDeviceId,
+        bounced: data.bounced || false
+      };
+      
+      // Add message to state
+      setMessages(prevMessages => [...prevMessages, newMessage]);
+      
+      // Update chat history
+      updateChatHistory(data.from, newMessage);
+      
+      // Update trust status - we've received a message from this user
+      updateTrustStatus(data.from, { receivedMessage: true });
+      
+      // Store the sender's public key if provided
+      if (data.publicKey && !publicKeys[data.from]) {
+        setPublicKeys(prev => ({
+          ...prev,
+          [data.from]: data.publicKey
+        }));
+        console.log(`Stored public key for ${data.from}`);
+      }
+      
+      // Check identity
+      if (data.fromDeviceId) {
+        checkIdentity(data.from, data.fromDeviceId);
+      }
+    });
+    
+    // Handle typing indicators
+    socketRef.current.on('userTyping', (data) => {
+      if (data.username === recipient) {
+        setTyping(true);
+        
+        // Clear previous timeout
+        if (typingTimeoutRef.current) {
+          clearTimeout(typingTimeoutRef.current);
+        }
+        
+        // Set timeout to clear typing indicator
+        typingTimeoutRef.current = setTimeout(() => {
+          setTyping(false);
+        }, 3000);
+      }
+    });
+    
+    // Handle user status updates
+    socketRef.current.on('userStatusUpdate', (data) => {
+      console.log(`User status update: ${data.username} is ${data.online ? 'online' : 'offline'}`);
+      
+      // Update online users list
+      setOnlineUsers(prev => {
+        if (data.online && !prev.includes(data.username)) {
+          return [...prev, data.username];
+        } else if (!data.online) {
+          return prev.filter(user => user !== data.username);
+        }
+        return prev;
+      });
+      
+      // Update recipient status if this is the current recipient
+      if (data.username === recipient) {
+        setRecipientStatus(prev => ({
+          ...prev,
+          online: data.online
+        }));
+      }
+    });
+    
+    // Handle public key requests
+    socketRef.current.on('publicKeyRequest', (data, ack) => {
+      console.log(`Public key requested by ${data.from}`);
+      
+      if (keyPair && keyPair.publicKey) {
+        console.log('Sending public key');
+        if (ack) ack({ publicKey: keyPair.publicKey });
+      } else {
+        console.log('No public key available');
+        if (ack) ack({ success: false, reason: 'No public key available' });
+      }
+    });
+    
+    // Handle relay-specific events
+    socketRef.current.on('relayInfo', (data) => {
+      console.log('Received relay info:', data);
+      setConnectionDetails(prev => ({
+        ...prev,
+        ...data,
+        relayStatus: 'connected_to_relay'
+      }));
+    });
+  };
+
   const startRelayPolling = () => {
     // Clear any existing polling interval
     if (window.relayPollingInterval) {
@@ -687,7 +1032,7 @@ function App() {
     // Set up polling interval
     window.relayPollingInterval = setInterval(() => {
       if (socketRef.current && socketRef.current.connected && 
-          connectionDetails.relayStatus === 'direct_to_base') {
+          (connectionDetails.relayStatus === 'direct_to_base' || connectionDetails.relayId === 'direct')) {
         console.log('Polling for available relays...');
         
         socketRef.current.emit('getAvailableRelays', {}, (response) => {
@@ -700,7 +1045,7 @@ function App() {
               relays: response.relays
             }));
             
-            // Connect to a relay
+            // Connect to the first available relay
             connectToRelay(response.relays);
             
             // Clear polling interval
@@ -766,7 +1111,8 @@ function App() {
         }
       }
       
-      setMessages(msgs => [...msgs, { 
+      // Create message object
+      const messageObj = { 
         from, 
         message: decryptedMessage, 
         fromDeviceId, 
@@ -774,7 +1120,16 @@ function App() {
         encrypted,
         decryptionStatus,
         bounced
-      }]);
+      };
+      
+      // Add to messages array for current view
+      setMessages(msgs => [...msgs, messageObj]);
+      
+      // Update chat history for this contact
+      updateChatHistory(from, messageObj);
+      
+      // Update trust status - mark that we received a message from this user
+      updateTrustStatus(from, { receivedMessage: true });
     });
     
     // Handle public key requests
@@ -818,7 +1173,7 @@ function App() {
         return prev;
       });
       
-      // If we're currently checking a recipient, refresh their status
+      // If we have a recipient, check if they're in the online users list
       if (recipient) {
         checkRecipientStatus();
       }
@@ -831,16 +1186,16 @@ function App() {
         setOnlineUsers(data.users);
         
         // If we have a recipient, check if they're in the online users list
-        if (recipient && data.users.includes(recipient)) {
+        if (recipient) {
+          const isOnline = data.users.includes(recipient);
+          console.log(`Recipient ${recipient} is ${isOnline ? 'online' : 'offline'}`);
+          
           setRecipientStatus(prev => ({ 
             ...prev, 
-            exists: true,
-            online: true,
-            notRegisteredYet: false
+            exists: prev.exists, // Keep existing value
+            online: isOnline,
+            notRegisteredYet: false // Clear this flag since we got an update
           }));
-        } else if (recipient) {
-          // If recipient is not in the online users list, refresh their status
-          checkRecipientStatus();
         }
       }
     });
@@ -864,14 +1219,13 @@ function App() {
         type: 'error'
       });
     });
-  };
-
-  const getOnlineUsers = () => {
-    if (socketRef.current) {
-      socketRef.current.emit('getOnlineUsers', {}, (users) => {
-        console.log('Online users:', users);
-        if (Array.isArray(users)) {
-          setOnlineUsers(users);
+    
+    // Request online users list
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('getOnlineUsers', {}, (response) => {
+        if (response && Array.isArray(response.users)) {
+          console.log('Online users:', response.users);
+          setOnlineUsers(response.users);
         }
       });
     }
@@ -887,158 +1241,59 @@ function App() {
           }
         });
         
-        // Also refresh online users list
-        getOnlineUsers();
-        
-        // If we have a recipient, check their status
-        if (recipient) {
-          checkRecipientStatus();
-        }
+        // Request online users list
+        socketRef.current.emit('getOnlineUsers', {}, (response) => {
+          if (response && Array.isArray(response.users)) {
+            console.log('Online users:', response.users);
+            setOnlineUsers(response.users);
+          }
+        });
       }
-    }, 30000); // Every 30 seconds
+    }, 30000); // Ping every 30 seconds
   };
 
-  // Check recipient status
   const checkRecipientStatus = () => {
-    if (!recipient || !socketRef.current) {
-      setRecipientStatus({ exists: false, online: false, checking: false });
+    if (!recipient || !socketRef.current || !socketRef.current.connected) {
       return;
     }
     
     console.log(`Checking status for recipient: ${recipient}`);
     
-    // Set status to checking while we wait for the response
-    setRecipientStatus(prev => ({ ...prev, checking: true }));
+    // Check if the recipient is in the online users list
+    const isOnline = onlineUsers.includes(recipient);
     
-    // Set a timeout to clear the checking status if we don't get a response
-    const checkingTimeout = setTimeout(() => {
-      setRecipientStatus(prev => {
-        if (prev.checking) {
-          return { ...prev, checking: false };
-        }
-        return prev;
-      });
-    }, 3000); // 3 seconds timeout
+    // First update based on our local knowledge
+    setRecipientStatus(prev => ({
+      ...prev,
+      online: isOnline
+    }));
     
-    // First check if the recipient is in the online users list
-    if (onlineUsers.includes(recipient)) {
-      clearTimeout(checkingTimeout);
-      console.log(`${recipient} found in online users list`);
-      setRecipientStatus({ exists: true, online: true, checking: false });
-      return;
-    }
-    
-    // If we're connected to a relay, use the checkRecipient event
-    if (connectionDetails.relayStatus === 'connected_to_relay') {
-      socketRef.current.emit('checkRecipient', { username: recipient }, (relayResponse) => {
-        clearTimeout(checkingTimeout);
-        console.log('Relay recipient check response:', relayResponse);
-        if (relayResponse && typeof relayResponse.exists === 'boolean') {
-          // Only update if we got a valid response
-          setRecipientStatus({
-            ...relayResponse,
-            checking: false
-          });
-        } else {
-          // If no valid response, mark as not found
-          setRecipientStatus({ 
-            exists: false, 
-            online: false, 
-            checking: false 
-          });
-        }
-      });
-    } else {
-      // If connected directly to base node, use checkUser
-      socketRef.current.emit('checkUser', { username: recipient }, (response) => {
-        clearTimeout(checkingTimeout);
-        console.log('Base node recipient check response:', response);
+    // Then check with the server for the most accurate information
+    socketRef.current.emit('checkRecipient', { username: recipient }, (response) => {
+      console.log('Check recipient response:', response);
+      
+      if (response) {
+        // Update with the server's response
+        setRecipientStatus({ 
+          exists: response.exists || false, 
+          online: response.online || false,
+          notRegisteredYet: !response.exists,
+          location: response.location || 'unknown'
+        });
         
-        // If we got a valid response, use it
-        if (response && typeof response.exists === 'boolean') {
-          setRecipientStatus({
-            ...response,
-            checking: false
-          });
-        } else {
-          // If no valid response, mark as not found
-          setRecipientStatus({ 
-            exists: false, 
-            online: false, 
-            checking: false 
-          });
+        // If the user is online according to the server but not in our list, add them
+        if (response.online && !onlineUsers.includes(recipient)) {
+          setOnlineUsers(prev => [...prev, recipient]);
         }
-      });
-    }
-  };
-
-  // Effect to check recipient status whenever recipient changes
-  useEffect(() => {
-    const timeoutId = setTimeout(() => {
-      if (connected && recipient) {
-        checkRecipientStatus();
       }
-    }, 500); // Debounce
-    
-    return () => clearTimeout(timeoutId);
-  }, [connected, recipient]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
-
-  const handleUsernameSubmit = async (e) => {
-    e.preventDefault();
-    if (username.trim() && relayStatus === 'online') {
-      setIsCheckingUsername(true);
-      const tempSocket = io(BASE_NODE_URL, { forceNew: true, timeout: 5000 });
-      tempSocket.on('connect', () => {
-        tempSocket.emit('checkUser', { username: username.trim() }, (response) => {
-          setIsCheckingUsername(false);
-          if (response && response.exists) {
-            setUsernameAvailable(false);
-            setSecurityAlert({
-              username: 'System',
-              message: `Username "${username}" is already taken.`,
-              type: 'error'
-            });
-            // Explicitly disconnect and do NOT set connected to true
-            tempSocket.disconnect();
-          } else {
-            setUsernameAvailable(true);
-            setConnected(true);
-            tempSocket.disconnect();
-          }
-        });
-      });
-      tempSocket.on('connect_error', (error) => {
-        console.error('Connection error during username check:', error);
-        setIsCheckingUsername(false);
-        setSecurityAlert({
-          username: 'System',
-          message: 'Could not verify username. Base node may be offline.',
-          type: 'error'
-        });
-        tempSocket.disconnect();
-      });
-    } else if (relayStatus !== 'online') {
-      setSecurityAlert({
-        username: 'System',
-        message: 'Cannot connect: Base node is offline',
-        type: 'error'
-      });
-    }
+    });
   };
 
   const handleRecipientChange = (e) => {
     const newRecipient = e.target.value.trim();
     setRecipient(newRecipient);
     
-    // Reset recipient status when the recipient changes
-    setRecipientStatus({ exists: false, online: false, checking: false });
-    
-    // If the recipient is not empty, check their status
-    if (newRecipient && socketRef.current) {
+    if (newRecipient) {
       // Use a small delay to avoid too many checks while typing
       if (recipientCheckTimeoutRef.current) {
         clearTimeout(recipientCheckTimeoutRef.current);
@@ -1058,21 +1313,26 @@ function App() {
       // Show sending indicator
       setStatus('Sending message...');
       
-      // If this is a relay/bounce message, we'll proceed regardless of recipient status
-      if (!bounce) {
-        // For direct messages, we need to check if the recipient exists and is online
-        const recipientOnline = recipientStatus.online;
-        
-        // If recipient is not online, suggest using relay
-        if (!recipientOnline) {
-          setSecurityAlert({
-            username: 'System',
-            message: `${recipient} is offline or not found. Use the RELAY button to send a delayed message.`,
-            type: 'warning'
+      // Always allow sending messages, regardless of recipient status
+      // This fixes the issue where users can't send messages even when the recipient is online
+      
+      // If this is not a bounce message and the recipient appears offline,
+      // do a quick check to verify their status
+      if (!bounce && !recipientStatus.online) {
+        // Check recipient status one more time before proceeding
+        await new Promise(resolve => {
+          socketRef.current.emit('checkRecipient', { username: recipient }, (response) => {
+            console.log('Final recipient check before sending:', response);
+            if (response && response.exists) {
+              setRecipientStatus(prev => ({
+                ...prev,
+                exists: true,
+                online: response.online || false
+              }));
+            }
+            resolve();
           });
-          setStatus('Registered successfully');
-          return;
-        }
+        });
       }
       
       // Get recipient's public key if we don't have it and encryption is enabled
@@ -1130,14 +1390,16 @@ function App() {
         setStatus('Registered successfully');
       }, 10000);
       
-      socketRef.current.emit('sendMessage', messageData, (response) => {
+      // Use the correct event name based on whether we're connected to a relay or base node
+      const eventName = connectionDetails.relayStatus === 'connected_to_relay' ? 'sendMessage' : 'routeMessage';
+      socketRef.current.emit(eventName, messageData, (response) => {
         clearTimeout(messageTimeout);
         console.log('Send message response:', response);
         setStatus('Registered successfully');
         
         if (response && (response.delivered || response.bounced)) {
-          // Add message to local state (store original message for display)
-          setMessages(msgs => [...msgs, { 
+          // Create message object
+          const messageObj = { 
             from: username, 
             message: message.trim(), // Store original message for display
             fromDeviceId: deviceId, 
@@ -1145,7 +1407,17 @@ function App() {
             status: response.delivered ? 'delivered' : 'bounced',
             expiresAt: response.expiresAt,
             encrypted: isEncrypted
-          }]);
+          };
+          
+          // Add message to local state (store original message for display)
+          setMessages(msgs => [...msgs, messageObj]);
+          
+          // Update chat history for this contact
+          updateChatHistory(recipient, messageObj);
+          
+          // Update trust status - mark that we sent a message to this user
+          updateTrustStatus(recipient, { sentMessage: true });
+          
           setMessage('');
           
           // Show notification if message was bounced
@@ -1168,8 +1440,8 @@ function App() {
                 type: 'info'
               });
               
-              // Add message to local state as bounced
-              setMessages(msgs => [...msgs, { 
+              // Create message object
+              const messageObj = { 
                 from: username, 
                 message: message.trim(),
                 fromDeviceId: deviceId, 
@@ -1177,7 +1449,17 @@ function App() {
                 status: 'bounced',
                 expiresAt: Date.now() + 14400000, // 4 hours
                 encrypted: isEncrypted
-              }]);
+              };
+              
+              // Add message to local state as bounced
+              setMessages(msgs => [...msgs, messageObj]);
+              
+              // Update chat history for this contact
+              updateChatHistory(recipient, messageObj);
+              
+              // Update trust status - mark that we sent a message to this user
+              updateTrustStatus(recipient, { sentMessage: true });
+              
               setMessage('');
             } else {
               setSecurityAlert({
@@ -1244,10 +1526,10 @@ function App() {
     });
   };
   
-  // Handle relay bounce for any user
-  const handleRelayBounce = (e) => {
-    e.preventDefault();
-    if (!recipient || !message.trim() || !socketRef.current) return;
+  const handleBounce = (e) => {
+    if (!recipient || !message.trim()) {
+      return;
+    }
     
     // Show confirmation before bouncing
     const confirmBounce = window.confirm(
@@ -1271,28 +1553,6 @@ function App() {
     }
   };
 
-  const handleDisconnect = () => {
-    if (socketRef.current) {
-      // Notify the server that we're intentionally disconnecting
-      socketRef.current.emit('userLogout', { username, deviceId }, () => {
-        console.log('Sent logout notification to server');
-        
-        // Now disconnect
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      });
-    }
-    
-    // Clear local state
-    setConnected(false);
-    setMessages([]);
-    setOnlineUsers([]);
-    setRecipientStatus({ exists: false, online: false });
-    setStatus('Disconnected');
-    setRelayStatus('offline');
-    clearInterval(pingIntervalRef.current);
-  };
-
   const dismissAlert = () => {
     setSecurityAlert(null);
   };
@@ -1312,427 +1572,192 @@ function App() {
     const date = new Date(timestamp);
     return `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}]`;
   };
+  
+  // Function to switch to a specific chat
+  const switchToChat = (contactUsername) => {
+    setActiveChat(contactUsername);
+    setRecipient(contactUsername || '');
+    
+    // Load messages for this contact
+    if (contactUsername && chatHistory[contactUsername]) {
+      setMessages(chatHistory[contactUsername]);
+    } else {
+      setMessages([]);
+    }
+    
+    // Check if we need to show trust warning
+    if (contactUsername && trustStatus[contactUsername]) {
+      setShowTrustWarning(!trustStatus[contactUsername].mutualMessaging);
+    } else if (contactUsername) {
+      setShowTrustWarning(true);
+    } else {
+      setShowTrustWarning(false);
+    }
+  };
+  
+  // Function to toggle About page
+  const toggleAboutPage = () => {
+    setShowAboutPage(!showAboutPage);
+  };
 
   return (
     <div style={{ 
       background: '#0a0e14', 
       minHeight: '100vh', 
       color: '#a2aabc', 
-      display: 'flex', 
-      alignItems: 'center', 
-      justifyContent: 'center',
+      display: 'flex',
+      flexDirection: 'column',
       fontFamily: '"Fira Code", monospace'
     }}>
-      <div style={{ 
-        background: '#171c28', 
-        padding: 32, 
-        borderRadius: 8, 
-        minWidth: 400,
-        maxWidth: 600,
-        boxShadow: '0 4px 30px rgba(0, 255, 170, 0.15)',
-        border: '1px solid rgba(0, 255, 170, 0.3)'
+      {/* Header */}
+      <header style={{
+        background: '#171c28',
+        padding: '16px 24px',
+        borderBottom: '1px solid rgba(0, 255, 170, 0.3)',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center'
       }}>
-        <div style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center',
-          marginBottom: 24 
-        }}>
-          <h2 style={{ 
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <h1 style={{ 
             margin: 0, 
             color: '#5ccfe6', 
             fontFamily: '"Fira Code", monospace',
-            letterSpacing: '1px'
-          }}>WhisperNet_</h2>
+            letterSpacing: '1px',
+            fontSize: '24px'
+          }}>WhisperNet_</h1>
+          
+          {username && (
+            <span style={{ 
+              marginLeft: '16px', 
+              color: '#bae67e', 
+              fontSize: '14px',
+              padding: '4px 8px',
+              background: 'rgba(186, 230, 126, 0.1)',
+              borderRadius: '4px'
+            }}>
+              @{username}
+            </span>
+          )}
+        </div>
+        
+        <div style={{ display: 'flex', alignItems: 'center' }}>
           <div style={{ 
             fontSize: 12, 
             padding: '4px 8px', 
             borderRadius: 4, 
             background: relayStatus === 'online' ? '#1c4b3c' : '#4b1c1c',
             color: relayStatus === 'online' ? '#5ccfe6' : '#ff8f40',
-            cursor: 'pointer'
+            cursor: 'pointer',
+            marginRight: '12px'
           }} onClick={() => setShowConnectionInfo(!showConnectionInfo)}>
             {relayStatus === 'online' ? 'Base Node Online' : 
              relayStatus === 'checking' ? 'Checking...' : 'Base Node Offline'}
           </div>
-        </div>
-        
-        {showConnectionInfo && (
-          <div style={{ 
-            background: '#0d1117', 
-            padding: 12, 
-            borderRadius: 4, 
-            fontSize: 12, 
-            fontFamily: 'monospace',
-            marginBottom: 16,
-            border: '1px solid #1e2d3d'
-          }}>
-            <div>Status: {status}</div>
-            {connected && (
-              <>
-                <div>Socket ID: {connectionDetails.socketId || 'unknown'}</div>
-                <div>Transport: {connectionDetails.transport || 'unknown'}</div>
-                <div>Base Node: {connectionDetails.baseNodeUrl || BASE_NODE_URL}</div>
-                <div>Relay ID: <span style={{ color: '#5ccfe6' }}>{relayServerUrl || 'Unknown'}</span></div>
-                <div>Relay Status: <span style={{ 
-                  color: connectionDetails.relayStatus === 'connected_to_base' ? '#bae67e' : 
-                         connectionDetails.relayStatus === 'direct_to_base' ? '#5ccfe6' : '#ff8f40' 
-                }}>
-                  {connectionDetails.relayStatus === 'connected_to_base' ? 'Connected to Base' : 
-                   connectionDetails.relayStatus === 'direct_to_base' ? 'Direct to Base Node' : 
-                   connectionDetails.relayStatus === 'assigned_by_base' ? 'Assigned by Base' : 'Standalone'}
-                </span></div>
-                {connectionDetails.connectedUsers !== undefined && (
-                  <div>Users on Relay: {connectionDetails.connectedUsers}</div>
-                )}
-                {connectionDetails.ip && connectionDetails.port && (
-                  <div>Relay Address: {connectionDetails.ip}:{connectionDetails.port}</div>
-                )}
-              </>
-            )}
-            <div>Base Node Status: <span style={{
-              color: relayStatus === 'online' ? '#bae67e' : '#ff8f40'
-            }}>{relayStatus}</span></div>
-            {deviceId && <div>Device ID: {deviceId.substring(0, 8)}...</div>}
-          </div>
-        )}
-        
-        {securityAlert && (
-          <div style={{ 
-            background: '#4b1c1c', 
-            color: '#ff8f40', 
-            padding: 12, 
-            borderRadius: 4, 
-            marginBottom: 16,
-            position: 'relative',
-            fontSize: 14
-          }}>
-            <div style={{ marginRight: 20 }}>{securityAlert.message}</div>
+          
+          {connected && (
             <button 
               style={{ 
-                position: 'absolute', 
-                top: 8, 
-                right: 8, 
-                background: 'none', 
-                border: 'none', 
+                padding: '8px 16px', 
+                borderRadius: 4, 
+                background: '#4b1c1c', 
                 color: '#ff8f40', 
+                fontSize: 14, 
+                border: 'none',
                 cursor: 'pointer',
-                fontSize: 16
-              }}
-              onClick={dismissAlert}
+                fontFamily: '"Fira Code", monospace',
+                marginRight: '12px'
+              }} 
+              onClick={handleDisconnect}
             >
-              ×
+              DISCONNECT
             </button>
-          </div>
-        )}
-        
-        {!connected ? (
-          <div>
-            <div style={{ marginBottom: 16, fontSize: 14, color: '#5ccfe6' }}>
-              {getTimestamp()} Initializing secure connection...
-            </div>
-            <form onSubmit={handleUsernameSubmit}>
-              <input
-                style={{ 
-                  width: '100%', 
-                  padding: 10, 
-                  marginBottom: 12, 
-                  borderRadius: 4, 
-                  border: '1px solid #1e2d3d', 
-                  background: '#0d1117',
-                  color: '#a2aabc',
-                  fontSize: 16,
-                  fontFamily: '"Fira Code", monospace',
-                  boxSizing: 'border-box'
-                }}
-                placeholder="Enter username"
-                value={username}
-                onChange={e => {
-                  setUsername(e.target.value);
-                  setUsernameAvailable(true);
-                }}
-                required
-              />
-              {!usernameAvailable && <div style={{color: '#ff8f40', fontSize: 12, marginTop: -8, marginBottom: 8}}>Username not available.</div>}
-              <button
-                style={{
-                  width: '100%',
-                  padding: 10,
-                  borderRadius: 4,
-                  background: relayStatus === 'online' ?
-                    'linear-gradient(90deg, #5ccfe6, #bae67e)' :
-                    '#636b78',
-                  color: '#171c28',
-                  fontWeight: 'bold',
-                  fontSize: 16,
-                  border: 'none',
-                  cursor: relayStatus === 'online' && !isCheckingUsername ? 'pointer' : 'not-allowed',
-                  fontFamily: '"Fira Code", monospace'
-                }}
-                type="submit"
-                disabled={relayStatus !== 'online' || isCheckingUsername}
-              >
-                {isCheckingUsername ? 'CHECKING...' : (relayStatus === 'online' ? 'AUTHENTICATE' : 'BASE NODE OFFLINE')}
-              </button>
-            </form>
-            {relayStatus !== 'online' && (
-              <button 
-                style={{ 
-                  width: '100%', 
-                  padding: 8, 
-                  marginTop: 8,
-                  borderRadius: 4, 
-                  background: '#4b1c1c', 
-                  color: '#ff8f40', 
-                  fontSize: 14, 
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontFamily: '"Fira Code", monospace'
-                }} 
-                onClick={retryConnection}
-              >
-                RETRY CONNECTION
-              </button>
-            )}
-            <div style={{ marginTop: 12, color: '#ff3333', textAlign: 'center', fontSize: 14 }}>
-              {status}
-            </div>
-          </div>
-        ) : (
-          <>
-            <form onSubmit={handleSend} style={{ display: 'flex', flexDirection: 'column', marginBottom: 16 }}>
-              <div style={{ display: 'flex', marginBottom: 8 }}>
-                <input
-                  style={{ 
-                    flex: 1, 
-                    padding: 10, 
-                    borderRadius: 4, 
-                    border: '1px solid #1e2d3d', 
-                    background: '#0d1117',
-                    color: '#a2aabc',
-                    fontSize: 14,
-                    marginRight: 8,
-                    fontFamily: '"Fira Code", monospace'
-                  }}
-                  placeholder="Recipient username"
-                  value={recipient}
-                  onChange={handleRecipientChange}
-                  required
-                />
-                {recipient && (
-                  <div style={{ 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    marginLeft: 8,
-                    fontSize: 12
-                  }}>
-                    <div style={{ 
-                      width: 8, 
-                      height: 8, 
-                      borderRadius: '50%', 
-                      background: recipientStatus.online ? '#bae67e' : 
-                                 recipientStatus.exists ? '#ff8f40' : '#ff3333',
-                      marginRight: 6 
-                    }}></div>
-                    <span style={{
-                      fontSize: 12,
-                      color: recipientStatus.online ? '#bae67e' : 
-                            recipientStatus.exists ? '#ff8f40' : '#ff3333'
-                    }}>
-                      {recipientStatus.online ? 'ONLINE' : 'OFFLINE'}
-                    </span>
-                  </div>
-                )}
-              </div>
-              <div style={{ display: 'flex' }}>
-                <input
-                  style={{ 
-                    flex: 1, 
-                    padding: 10, 
-                    borderRadius: 4, 
-                    border: '1px solid #1e2d3d', 
-                    background: '#0d1117',
-                    color: '#a2aabc',
-                    fontSize: 14,
-                    marginRight: 8,
-                    fontFamily: '"Fira Code", monospace'
-                  }}
-                  placeholder="Type a message"
-                  value={message}
-                  onChange={handleMessageChange}
-                  required
-                />
-                {recipient ? (
-                  <div style={{ display: 'flex' }}>
-                    {/* SEND button */}
-                    <button 
-                      style={{ 
-                        padding: '0 18px', 
-                        borderRadius: '4px 0 0 4px', 
-                        background: recipientStatus.online ? 
-                          'linear-gradient(90deg, #5ccfe6, #bae67e)' : 
-                          '#636b78', 
-                        color: '#171c28', 
-                        fontWeight: 'bold', 
-                        fontSize: 14, 
-                        border: 'none',
-                        cursor: recipientStatus.online ? 'pointer' : 'not-allowed',
-                        fontFamily: '"Fira Code", monospace'
-                      }} 
-                      type="submit"
-                      disabled={!recipientStatus.online}
-                      title={recipientStatus.online ? "Send message directly" : "User is offline or not found"}
-                    >
-                      SEND
-                    </button>
-                    
-                    {/* Always show the RELAY button */}
-                    <button 
-                      style={{ 
-                        padding: '0 12px', 
-                        borderRadius: '0 4px 4px 0', 
-                        background: '#4b1c1c', 
-                        color: '#ff8f40', 
-                        fontWeight: 'bold', 
-                        fontSize: 14, 
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontFamily: '"Fira Code", monospace',
-                        display: 'flex',
-                        alignItems: 'center'
-                      }} 
-                      onClick={handleRelayBounce}
-                      title="Message will be stored on relay servers for up to 4 hours"
-                    >
-                      RELAY
-                      <span style={{
-                        fontSize: 10,
-                        marginLeft: 4,
-                        background: 'rgba(255, 143, 64, 0.2)',
-                        padding: '1px 3px',
-                        borderRadius: 2
-                      }}>
-                        4h
-                      </span>
-                    </button>
-                  </div>
-                ) : (
-                  <button 
-                    style={{ 
-                      padding: '0 18px', 
-                      borderRadius: 4, 
-                      background: '#636b78', 
-                      color: '#171c28', 
-                      fontWeight: 'bold', 
-                      fontSize: 14, 
-                      border: 'none',
-                      cursor: 'not-allowed',
-                      fontFamily: '"Fira Code", monospace'
-                    }} 
-                    disabled={true}
-                  >
-                    SEND
-                  </button>
-                )}
-              </div>
-            </form>
-            
-            {typing && recipient && (
-              <div style={{ fontSize: 12, color: '#5ccfe6', marginBottom: 8 }}>
-                {recipient} is typing...
-              </div>
-            )}
-            
-            <div style={{ 
-              background: '#0d1117', 
+          )}
+          
+          <button 
+            style={{ 
+              padding: '8px 16px', 
               borderRadius: 4, 
-              padding: 12, 
-              minHeight: 200, 
-              maxHeight: 350, 
-              overflowY: 'auto', 
-              marginBottom: 12,
-              border: '1px solid #1e2d3d',
-              fontFamily: 'monospace'
-            }}>
-              {messages.length === 0 ? (
-                <div style={{ color: '#5ccfe6', fontSize: 14 }}>
-                  {getTimestamp()} Connection established. Awaiting transmission...
-                </div>
-              ) : (
-                messages.map((msg, i) => (
-                  <div key={i} style={{ 
-                    marginBottom: 12, 
-                    padding: 8,
-                    borderRadius: 4,
-                    background: msg.from === username ? 'rgba(92, 207, 230, 0.1)' : 'rgba(186, 230, 126, 0.1)',
-                    borderLeft: msg.from === username ? '2px solid #5ccfe6' : '2px solid #bae67e'
-                  }}>
-                    <div style={{ 
-                      display: 'flex', 
-                      justifyContent: 'space-between', 
-                      marginBottom: 4, 
-                      fontSize: 12 
-                    }}>
-                      <span style={{ 
-                        color: msg.from === username ? '#5ccfe6' : '#bae67e',
-                        fontWeight: 'bold'
-                      }}>
-                        {msg.from === username ? 'YOU' : msg.from}
-                        {msg.bounced && <span style={{ color: '#ff8f40', marginLeft: 6 }}>(bounced)</span>}
-                      </span>
-                      <span style={{ color: '#636b78' }}>{formatMessageTime(msg.timestamp)}</span>
-                    </div>
-                    <div style={{ wordBreak: 'break-word', fontSize: 14 }}>{msg.message}</div>
-                    {msg.status === 'bounced' && (
-                      <div style={{ 
-                        fontSize: 10, 
-                        color: '#ff8f40', 
-                        marginTop: 4,
-                        fontStyle: 'italic'
-                      }}>
-                        Message will be delivered when recipient comes online (expires in 4 hours)
-                      </div>
-                    )}
-                  </div>
-                ))
-              )}
-              <div ref={messagesEndRef} />
-            </div>
-            
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <button 
-                style={{ 
-                  padding: '8px 16px', 
-                  borderRadius: 4, 
-                  background: '#4b1c1c', 
-                  color: '#ff8f40', 
-                  fontSize: 14, 
-                  border: 'none',
-                  cursor: 'pointer',
-                  fontFamily: '"Fira Code", monospace'
-                }} 
-                onClick={handleDisconnect}
-              >
-                DISCONNECT
-              </button>
-              
-              <div style={{ 
-                fontSize: 12, 
-                color: '#636b78', 
-                display: 'flex', 
-                alignItems: 'center' 
-              }}>
-                <div style={{ 
-                  width: 8, 
-                  height: 8, 
-                  borderRadius: '50%', 
-                  background: status.includes('Connected') || status.includes('Registered') ? '#bae67e' : '#ff3333',
-                  marginRight: 6 
-                }}></div>
-                {status.includes('Connected') || status.includes('Registered') ? 'SECURE CONNECTION' : 'CONNECTION LOST'}
-              </div>
-            </div>
-          </>
+              background: '#1c3b4b', 
+              color: '#5ccfe6', 
+              fontSize: 14, 
+              border: 'none',
+              cursor: 'pointer',
+              fontFamily: '"Fira Code", monospace'
+            }} 
+            onClick={toggleAboutPage}
+          >
+            {showAboutPage ? 'BACK TO CHAT' : 'ABOUT'}
+          </button>
+        </div>
+      </header>
+      
+      {/* Connection info */}
+      {showConnectionInfo && (
+        <div style={{ padding: '0 24px' }}>
+          <ConnectionInfo
+            status={status}
+            connected={connected}
+            connectionDetails={connectionDetails}
+            relayServerUrl={relayServerUrl}
+            relayStatus={relayStatus}
+            deviceId={deviceId}
+            BASE_NODE_URL={BASE_NODE_URL}
+          />
+        </div>
+      )}
+      
+      {/* Security alert */}
+      {securityAlert && (
+        <div style={{ padding: '0 24px' }}>
+          <SecurityAlert alert={securityAlert} onDismiss={dismissAlert} />
+        </div>
+      )}
+      
+      {/* Main content */}
+      <div style={{ 
+        flex: 1,
+        display: 'flex',
+        height: 'calc(100vh - 69px - (showConnectionInfo ? 80 : 0) - (securityAlert ? 60 : 0))' // Subtract header height and optional elements
+      }}>
+        {showAboutPage ? (
+          <AboutPage />
+        ) : !connected ? (
+          <LoginScreen
+            username={username}
+            handleUsernameChange={handleUsernameChange}
+            handleUsernameSubmit={handleUsernameSubmit}
+            isCheckingUsername={isCheckingUsername}
+            usernameAvailable={usernameAvailable}
+            relayStatus={relayStatus}
+            status={status}
+            securityAlert={securityAlert}
+            dismissAlert={dismissAlert}
+            retryConnection={retryConnection}
+            getTimestamp={getTimestamp}
+          />
+        ) : (
+          <ChatInterface
+            contacts={contacts}
+            activeChat={activeChat}
+            switchToChat={switchToChat}
+            onlineUsers={onlineUsers}
+            trustStatus={trustStatus}
+            recipient={recipient}
+            handleRecipientChange={handleRecipientChange}
+            message={message}
+            handleMessageChange={handleMessageChange}
+            handleSend={handleSend}
+            handleBounce={handleBounce}
+            recipientStatus={recipientStatus}
+            messages={messages}
+            username={username}
+            typing={typing}
+            messagesEndRef={messagesEndRef}
+            formatMessageTime={formatMessageTime}
+            getTimestamp={getTimestamp}
+            showTrustWarning={showTrustWarning}
+          />
         )}
       </div>
     </div>

@@ -131,6 +131,11 @@ io.on('connection', (socket) => {
         
         // Notify other users about the status change
         io.emit('userStatusUpdate', { username, online: false });
+        
+        // Immediately notify that this username is available
+        io.emit('usernameReleased', { username });
+        
+        console.log(`Username ${username} has been released and is now available`);
       } else {
         console.log(`Ignoring logout for ${username} - different device ID`);
       }
@@ -200,10 +205,26 @@ io.on('connection', (socket) => {
     const user = userRegistry[username];
     const response = { 
       exists: !!user, 
-      online: user?.online || false 
+      online: user?.online || false,
+      relayId: user?.relayId || null
     };
     console.log(`User check for ${username}:`, response);
-    if (ack) ack(response);
+    
+    // Even if the user doesn't exist in our registry, we'll allow messages to be sent
+    // This helps with the case where a user might register later
+    if (ack) {
+      if (user) {
+        ack(response);
+      } else {
+        // If user doesn't exist, we'll still return a positive response
+        // but mark them as not registered yet
+        ack({ 
+          exists: false, 
+          online: false, 
+          notRegisteredYet: true 
+        });
+      }
+    }
   });
 
   // Handle user registration (can be from relay or direct client)
@@ -529,8 +550,11 @@ io.on('connection', (socket) => {
           if (userRegistry[username] && !userRegistry[username].online) {
             console.log(`Removing inactive user ${username} from registry`);
             delete userRegistry[username];
+            
+            // Notify other users that this username is now available
+            io.emit('usernameReleased', { username });
           }
-        }, 300000); // 5 minutes
+        }, 30000); // 30 seconds - reduced from 5 minutes to make usernames available sooner
         
         // Notify other users about the status change
         io.emit('userStatusUpdate', { username, online: false });
@@ -546,13 +570,34 @@ io.on('connection', (socket) => {
         relaySockets[relayId].status = 'offline';
         relaySockets[relayId].socket = null;
         
+        // Mark all users on this relay as offline and schedule them for removal
+        for (const username in userRegistry) {
+          if (userRegistry[username].relayId === relayId) {
+            userRegistry[username].online = false;
+            
+            // Notify other users about the status change
+            io.emit('userStatusUpdate', { username, online: false });
+            
+            // Schedule username for release
+            setTimeout(() => {
+              if (userRegistry[username] && !userRegistry[username].online) {
+                console.log(`Removing inactive user ${username} from registry after relay disconnect`);
+                delete userRegistry[username];
+                
+                // Notify other users that this username is now available
+                io.emit('usernameReleased', { username });
+              }
+            }, 30000); // 30 seconds
+          }
+        }
+        
         // Set a timeout to remove the relay if it doesn't reconnect
         setTimeout(() => {
           if (relaySockets[relayId] && relaySockets[relayId].status === 'offline') {
             console.log(`Removing inactive relay ${relayId}`);
             delete relaySockets[relayId];
           }
-        }, 600000); // 10 minutes
+        }, 60000); // 1 minute - reduced from 10 minutes
         
         break;
       }
@@ -592,40 +637,8 @@ io.on('connection', (socket) => {
     io.emit('onlineUsersUpdate', { users: onlineUsers });
   });
 
-  socket.on('disconnect', () => {
-    console.log(`Connection ${socket.id} disconnected`);
-    
-    // Clean up user registry
-    for (const username in userRegistry) {
-      if (userRegistry[username].socketId === socket.id) {
-        userRegistry[username].online = false;
-        console.log(`User ${username} marked as offline`);
-      }
-    }
-    
-    // Clean up direct clients
-    if (directClients[socket.id]) {
-      delete directClients[socket.id];
-    }
-    
-    // Clean up relay sockets
-    for (const relayId in relaySockets) {
-      if (relaySockets[relayId].socketId === socket.id) {
-        console.log(`Relay ${relayId} disconnected`);
-        delete relaySockets[relayId];
-        
-        // Mark users on this relay as offline
-        for (const username in userRegistry) {
-          if (userRegistry[username].relayId === relayId) {
-            userRegistry[username].online = false;
-          }
-        }
-        
-        // Notify clients about relay disconnection
-        io.emit('relayStatusUpdate', { relayId, status: 'offline' });
-      }
-    }
-  });
+  // Note: We've removed the duplicate disconnect handler to avoid confusion
+  // The primary disconnect handler above handles all disconnect scenarios
 });
 
 const PORT = process.env.PORT || 5000;
