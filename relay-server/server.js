@@ -292,15 +292,28 @@ io.on('connection', (socket) => {
   
   // Check if a recipient exists and is online
   socket.on('checkRecipient', ({ username }, ack) => {
+    console.log(`Checking recipient status for: ${username}`);
+    
     // First check locally
     if (userSockets[username]) {
+      console.log(`${username} found locally and is online`);
       if (ack) ack({ exists: true, online: true, location: 'local' });
+      return;
+    }
+    
+    // Check if we have pending messages for this user
+    // If we do, it means the user exists but is offline
+    if (pendingMessages[username] && pendingMessages[username].length > 0) {
+      console.log(`${username} has pending messages, marking as exists but offline`);
+      if (ack) ack({ exists: true, online: false, location: 'pending', hasPendingMessages: true });
       return;
     }
     
     // Check with base node
     if (baseSocket && baseSocket.connected) {
+      console.log(`Checking ${username} with base node`);
       baseSocket.emit('checkUser', { username }, (response) => {
+        console.log(`Base node response for ${username}:`, response);
         if (ack) ack({ 
           exists: response?.exists || false, 
           online: response?.online || false,
@@ -308,7 +321,10 @@ io.on('connection', (socket) => {
         });
       });
     } else {
-      if (ack) ack({ exists: false, online: false, location: 'unknown' });
+      // If base node is not available, assume user might exist
+      // This allows relay messages to be sent even when base node is down
+      console.log(`Base node not available, assuming ${username} might exist`);
+      if (ack) ack({ exists: true, online: false, location: 'unknown', notRegisteredYet: true });
     }
   });
   
@@ -371,12 +387,13 @@ io.on('connection', (socket) => {
               publicKey
             });
             
-            console.log(`Message queued for ${to}, will expire in 4 hours`);
+            // Always store the message for potential delivery
+            console.log(`Message queued for ${to}, will expire in 4 hours.`);
             if (ack) ack({ 
               delivered: false, 
               bounced: true,
               expiresAt,
-              reason: 'Message queued for later delivery'
+              reason: 'Message queued for delivery when recipient is available'
             });
           } else {
             if (ack) ack({ 
@@ -410,7 +427,7 @@ io.on('connection', (socket) => {
             delivered: false, 
             bounced: true,
             expiresAt,
-            reason: 'Message queued locally for later delivery'
+            reason: 'Message queued for delivery when recipient is available'
           });
         } else {
           console.log('Cannot route message - base node not connected');
@@ -515,6 +532,26 @@ io.on('connection', (socket) => {
       };
       console.log('Sending relay info:', info);
       ack(info);
+    }
+  });
+  
+  // Get online users
+  socket.on('getOnlineUsers', (_, ack) => {
+    // First get locally connected users
+    const localUsers = Object.keys(userSockets);
+    
+    // If connected to base node, also get users from there
+    if (baseSocket && baseSocket.connected) {
+      baseSocket.emit('getOnlineUsers', {}, (baseUsers) => {
+        // Combine local and base node users, removing duplicates
+        const allUsers = [...new Set([...localUsers, ...(baseUsers || [])])];
+        console.log('All online users:', allUsers);
+        if (ack) ack(allUsers);
+      });
+    } else {
+      // Just return local users
+      console.log('Local online users:', localUsers);
+      if (ack) ack(localUsers);
     }
   });
   

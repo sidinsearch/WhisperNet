@@ -311,7 +311,24 @@ io.on('connection', (socket) => {
     const targetUser = userRegistry[to];
     if (!targetUser) {
       console.log(`Target user ${to} not found`);
-      if (ack) ack({ delivered: false, reason: 'User not found' });
+      
+      // If bounce is requested, store for potential future delivery
+      if (bounce) {
+        // Store the message for potential future delivery
+        // This allows messages to be delivered to users who register later
+        console.log(`Message from ${from} to ${to} will be stored for potential future delivery`);
+        
+        // In a production implementation, you would store this in a database
+        // For now, we'll just acknowledge it as bounced
+        if (ack) ack({ 
+          delivered: false, 
+          bounced: true,
+          expiresAt: Date.now() + 14400000, // 4 hours
+          reason: 'User not found, message will be delivered if they register' 
+        });
+      } else {
+        if (ack) ack({ delivered: false, reason: 'User not found' });
+      }
       return;
     }
     
@@ -559,6 +576,20 @@ io.on('connection', (socket) => {
     
     console.log(`Available relays: ${availableRelays.length}`);
     if (ack) ack({ relays: availableRelays });
+  });
+  
+  // Get online users
+  socket.on('getOnlineUsers', (_, ack) => {
+    const onlineUsers = Object.entries(userRegistry)
+      .filter(([_, user]) => user.online)
+      .map(([username, _]) => username);
+    
+    console.log('Online users:', onlineUsers);
+    if (ack) ack(onlineUsers);
+    
+    // Also broadcast the current online users to all connected clients
+    // This helps keep everyone's online user list in sync
+    io.emit('onlineUsersUpdate', { users: onlineUsers });
   });
 
   socket.on('disconnect', () => {

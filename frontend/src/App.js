@@ -129,6 +129,7 @@ function App() {
   const messagesEndRef = useRef(null);
   const typingTimeoutRef = useRef(null);
   const pingIntervalRef = useRef(null);
+  const recipientCheckTimeoutRef = useRef(null);
 
   // Get device fingerprint and initialize encryption on component mount
   useEffect(() => {
@@ -299,6 +300,8 @@ function App() {
     return () => {
       if (socketRef.current) {
         clearInterval(pingIntervalRef.current);
+        clearTimeout(recipientCheckTimeoutRef.current);
+        clearTimeout(typingTimeoutRef.current);
         socketRef.current.disconnect();
         socketRef.current = null;
       }
@@ -390,105 +393,9 @@ function App() {
       socketRef.current.disconnect();
     }
     
-    // Try to get cached relay information
-    const cachedRelayInfo = localStorage.getItem('whispernetRelayCache');
-    let cachedRelays = [];
-    
-    if (cachedRelayInfo) {
-      try {
-        const parsedCache = JSON.parse(cachedRelayInfo);
-        if (parsedCache.timestamp && (Date.now() - parsedCache.timestamp < 3600000)) { // Cache valid for 1 hour
-          cachedRelays = parsedCache.relays || [];
-          console.log('Using cached relay information:', cachedRelays);
-        } else {
-          console.log('Cached relay information expired');
-        }
-      } catch (error) {
-        console.error('Error parsing cached relay info:', error);
-      }
-    }
-    
-    // First try to connect to a relay server if we have cached relays
-    if (cachedRelays.length > 0) {
-      const relay = cachedRelays[0]; // Use the first available relay
-      const relayUrl = relay.id.startsWith('http') ? relay.id : `http://${relay.id}`;
-      
-      console.log(`Attempting to connect to relay server: ${relayUrl}`);
-      setStatus(`Connecting to relay server: ${relay.id}...`);
-      
-      // Try to connect to the relay
-      socketRef.current = io(relayUrl, {
-        transports: ['websocket', 'polling'],
-        reconnectionAttempts: 3,
-        reconnectionDelay: 2000,
-        forceNew: true
-      });
-      
-      // Set a timeout to fall back to base node if relay connection fails
-      const relayConnectionTimeout = setTimeout(() => {
-        if (!socketRef.current || !socketRef.current.connected) {
-          console.log('Relay connection timed out, falling back to base node');
-          connectDirectlyToBaseNode();
-        }
-      }, 5000);
-      
-      socketRef.current.on('connect', () => {
-        clearTimeout(relayConnectionTimeout);
-        console.log(`Connected to relay server: ${relayUrl}`);
-        setStatus(`Connected to relay server: ${relay.id}`);
-        setRelayStatus('online');
-        
-        setRelayServerUrl(relay.id);
-        setConnectionDetails({
-          socketId: socketRef.current.id,
-          transport: socketRef.current.io.engine.transport.name,
-          baseNodeUrl: BASE_NODE_URL,
-          relayId: relay.id,
-          relayStatus: 'connected_to_relay'
-        });
-        
-        // Register with the relay
-        socketRef.current.emit('register', { 
-          username, 
-          deviceId 
-        }, (response) => {
-          if (response && response.success) {
-            setStatus('Registered with relay server');
-            
-            // Set up socket event handlers
-            connectSocketEvents();
-            
-            // Start ping interval
-            startPingInterval();
-          } else {
-            console.error('Failed to register with relay:', response);
-            setStatus('Failed to register with relay server');
-            socketRef.current.disconnect();
-            
-            // Fall back to direct base node connection
-            connectDirectlyToBaseNode();
-          }
-        });
-      });
-      
-      socketRef.current.on('connect_error', (err) => {
-        clearTimeout(relayConnectionTimeout);
-        console.error(`Relay connection error: ${err.message}`);
-        setStatus(`Relay connection failed: ${err.message}`);
-        
-        // Fall back to direct base node connection
-        connectDirectlyToBaseNode();
-      });
-    } else {
-      // No cached relays, connect directly to base node
-      connectDirectlyToBaseNode();
-    }
-  };
-  
-  // Function to connect directly to the base node
-  const connectDirectlyToBaseNode = () => {
-    console.log('Connecting directly to base node:', BASE_NODE_URL);
-    setStatus('Connecting to base node...');
+    // Always connect to base node first for handshake and relay discovery
+    console.log('Connecting to base node for initial handshake:', BASE_NODE_URL);
+    setStatus('Connecting to base node for handshake...');
     
     // Connect to base node
     socketRef.current = io(BASE_NODE_URL, {
@@ -505,17 +412,17 @@ function App() {
     // Connection event handlers
     socketRef.current.on('connect', () => {
       console.log('Connected to base node with socket ID:', socketRef.current.id);
-      setStatus('Connected to base node');
+      setStatus('Connected to base node for handshake');
       setRelayStatus('online');
       
-      // When connecting directly to the base node, set the relay information accordingly
-      setRelayServerUrl(`Direct (${socketRef.current.id.substring(0, 8)}...)`);
+      // When connecting to the base node, set the relay information accordingly
+      setRelayServerUrl(`Base Node (Handshake)`);
       setConnectionDetails({
         socketId: socketRef.current.id,
         transport: socketRef.current.io.engine.transport.name,
         baseNodeUrl: BASE_NODE_URL,
-        relayId: 'direct',
-        relayStatus: 'direct_to_base'
+        relayId: 'base_handshake',
+        relayStatus: 'handshake'
       });
       
       // Get available relays first
@@ -529,16 +436,31 @@ function App() {
             relays: response.relays
           }));
           
-          // Continue with registration
-          registerWithBaseNode();
+          // Register with base node temporarily
+          registerWithBaseNode(() => {
+            // After successful registration, connect to a relay
+            connectToRelay(response.relays);
+          });
         } else {
-          // No relays available, but still register directly with base node
-          registerWithBaseNode();
+          // No relays available, register directly with base node
+          registerWithBaseNode(() => {
+            // Set UI to indicate we're using base node as fallback
+            setRelayServerUrl('Base Node (Fallback)');
+            setConnectionDetails(prev => ({
+              ...prev,
+              relayId: 'direct',
+              relayStatus: 'direct_to_base'
+            }));
+            setStatus('Using Base Node as fallback (no relays available)');
+            
+            // Start polling for available relays
+            startRelayPolling();
+          });
         }
       });
     });
     
-    const registerWithBaseNode = () => {
+    const registerWithBaseNode = (callback) => {
       // Register with base node
       socketRef.current.emit('registerUser', { 
         username, 
@@ -546,7 +468,7 @@ function App() {
       }, (response) => {
         console.log('Registration response:', response);
         if (response && response.success) {
-          setStatus('Registered successfully');
+          setStatus('Registered successfully with base node');
           
           // Set up socket event handlers
           connectSocketEvents();
@@ -555,6 +477,10 @@ function App() {
           getOnlineUsers();
           startPingInterval();
           
+          // Execute callback if provided
+          if (callback && typeof callback === 'function') {
+            callback();
+          }
         } else {
           const errorMsg = response?.reason || 'Registration failed';
           setStatus(`Registration failed: ${errorMsg}`);
@@ -572,28 +498,35 @@ function App() {
       setStatus(`Connection failed: ${err.message}`);
       setRelayStatus('offline');
       
-      // If we have cached relays, try to connect to one of them directly
-      if (cachedRelays.length > 0) {
-        const relay = cachedRelays[0]; // Use the first available relay
-        setStatus(`Trying fallback relay: ${relay.id}...`);
-        
-        // Attempt to connect to the relay directly
-        setTimeout(() => {
-          if (!socketRef.current || !socketRef.current.connected) {
-            tryConnectToRelay(relay);
+      // Try to use cached relays if available
+      const cachedRelayInfo = localStorage.getItem('whispernetRelayCache');
+      let cachedRelays = [];
+      
+      if (cachedRelayInfo) {
+        try {
+          const parsedCache = JSON.parse(cachedRelayInfo);
+          if (parsedCache.timestamp && (Date.now() - parsedCache.timestamp < 3600000)) { // Cache valid for 1 hour
+            cachedRelays = parsedCache.relays || [];
+            console.log('Using cached relay information:', cachedRelays);
+            
+            if (cachedRelays.length > 0) {
+              setTimeout(() => {
+                connectToRelay(cachedRelays);
+              }, 1000);
+            }
           }
-        }, 3000);
+        } catch (error) {
+          console.error('Error parsing cached relay info:', error);
+        }
       }
     });
     
     socketRef.current.on('disconnect', (reason) => {
       console.log('Disconnected from base node:', reason);
       setStatus(`Disconnected: ${reason}`);
-      setRelayStatus('offline');
-      clearInterval(pingIntervalRef.current);
       
       // Don't auto-reconnect if user manually disconnected
-      if (reason !== 'io client disconnect') {
+      if (reason !== 'io client disconnect' && connected) {
         setTimeout(() => {
           if (connected) {
             // Try to reconnect to base node first
@@ -604,62 +537,187 @@ function App() {
     });
   };
   
-  // Function to try connecting directly to a relay
-  const tryConnectToRelay = (relay) => {
-    if (!relay || !relay.id) return;
-    
-    const relayUrl = relay.id.startsWith('http') ? relay.id : `http://${relay.id}`;
-    console.log(`Attempting direct connection to relay: ${relayUrl}`);
-    
-    // Clear any previous connection
-    if (socketRef.current) {
-      socketRef.current.disconnect();
+  // Function to connect to a relay server
+  const connectToRelay = (relays) => {
+    if (!relays || !relays.length) {
+      console.log('No relays available to connect to');
+      return;
     }
     
-    socketRef.current = io(relayUrl, {
-      transports: ['websocket', 'polling'],
-      reconnectionAttempts: 3,
-      reconnectionDelay: 2000,
-      forceNew: true
-    });
+    // Use the first available relay
+    const relay = relays[0];
+    const relayUrl = relay.id.startsWith('http') ? relay.id : `http://${relay.id}`;
     
-    socketRef.current.on('connect', () => {
-      console.log(`Connected directly to relay: ${relayUrl}`);
-      setStatus(`Connected to fallback relay: ${relay.id}`);
+    console.log(`Switching to relay server: ${relayUrl}`);
+    setStatus(`Connecting to relay server: ${relay.id}...`);
+    
+    // Disconnect from base node first
+    if (socketRef.current) {
+      // Keep a reference to the old socket for cleanup
+      const oldSocket = socketRef.current;
       
-      // Register with the relay
-      socketRef.current.emit('register', { 
-        username, 
-        deviceId 
-      }, (response) => {
-        if (response && response.success) {
-          setStatus('Registered with fallback relay');
-          setRelayServerUrl(relay.id);
+      // Create new socket for relay
+      socketRef.current = io(relayUrl, {
+        transports: ['websocket', 'polling'],
+        reconnectionAttempts: 3,
+        reconnectionDelay: 2000,
+        forceNew: true
+      });
+      
+      // Set a timeout to disconnect from base node after relay connection is established
+      const relayConnectionTimeout = setTimeout(() => {
+        if (!socketRef.current || !socketRef.current.connected) {
+          console.log('Relay connection timed out, staying with base node');
+          socketRef.current = oldSocket; // Restore old socket
+          setStatus('Using Base Node (relay connection failed)');
+          setRelayServerUrl('Base Node (Fallback)');
           setConnectionDetails(prev => ({
             ...prev,
-            relayId: relay.id,
-            socketId: socketRef.current.id,
-            transport: socketRef.current.io.engine.transport.name,
-            relayStatus: 'standalone'
+            relayId: 'direct',
+            relayStatus: 'direct_to_base'
           }));
           
-          // Set up socket event handlers
-          connectSocketEvents();
+          // Start polling for available relays
+          startRelayPolling();
+        }
+      }, 5000);
+      
+      socketRef.current.on('connect', () => {
+        clearTimeout(relayConnectionTimeout);
+        console.log(`Connected to relay server: ${relayUrl}`);
+        
+        // Register with the relay
+        socketRef.current.emit('register', { 
+          username, 
+          deviceId 
+        }, (response) => {
+          if (response && response.success) {
+            console.log('Successfully registered with relay');
+            
+            // Now we can safely disconnect from the base node
+            oldSocket.disconnect();
+            
+            setStatus(`Connected to relay server: ${relay.id}`);
+            setRelayServerUrl(relay.id);
+            setConnectionDetails(prev => ({
+              ...prev,
+              relayId: relay.id,
+              socketId: socketRef.current.id,
+              transport: socketRef.current.io.engine.transport.name,
+              relayStatus: 'connected_to_relay'
+            }));
+            
+            // Set up socket event handlers
+            connectSocketEvents();
+            
+            // Start ping interval
+            startPingInterval();
+            
+            // Show connection info automatically
+            setShowConnectionInfo(true);
+            setTimeout(() => {
+              setShowConnectionInfo(false);
+            }, 5000);
+          } else {
+            console.error('Failed to register with relay:', response);
+            setStatus('Failed to register with relay server');
+            
+            // Disconnect from relay and stay with base node
+            socketRef.current.disconnect();
+            socketRef.current = oldSocket;
+            
+            setStatus('Using Base Node (relay registration failed)');
+            setRelayServerUrl('Base Node (Fallback)');
+            setConnectionDetails(prev => ({
+              ...prev,
+              relayId: 'direct',
+              relayStatus: 'direct_to_base'
+            }));
+            
+            // Start polling for available relays
+            startRelayPolling();
+          }
+        });
+      });
+      
+      socketRef.current.on('connect_error', (err) => {
+        clearTimeout(relayConnectionTimeout);
+        console.error(`Relay connection error: ${err.message}`);
+        
+        // Stay with base node
+        socketRef.current = oldSocket;
+        
+        setStatus('Using Base Node (relay connection error)');
+        setRelayServerUrl('Base Node (Fallback)');
+        setConnectionDetails(prev => ({
+          ...prev,
+          relayId: 'direct',
+          relayStatus: 'direct_to_base'
+        }));
+        
+        // Start polling for available relays
+        startRelayPolling();
+      });
+      
+      socketRef.current.on('disconnect', (reason) => {
+        console.log(`Disconnected from relay: ${reason}`);
+        
+        // If we were previously connected to a relay and lost connection
+        if (connectionDetails.relayStatus === 'connected_to_relay') {
+          setStatus(`Disconnected from relay: ${reason}`);
           
-          // Start ping interval
-          startPingInterval();
-        } else {
-          console.error('Failed to register with relay:', response);
-          setStatus('Failed to register with fallback relay');
-          socketRef.current.disconnect();
+          // Try to reconnect to base node
+          setTimeout(() => {
+            if (connected) {
+              connectToBaseNode();
+            }
+          }, 1000);
         }
       });
-    });
+    }
+  };
+  
+  // Function to periodically poll for available relays when using base node as fallback
+  const startRelayPolling = () => {
+    // Clear any existing polling interval
+    if (window.relayPollingInterval) {
+      clearInterval(window.relayPollingInterval);
+    }
     
-    socketRef.current.on('connect_error', (err) => {
-      console.error(`Relay connection error: ${err.message}`);
-      setStatus(`Fallback relay connection failed: ${err.message}`);
-    });
+    // Set up polling interval
+    window.relayPollingInterval = setInterval(() => {
+      if (socketRef.current && socketRef.current.connected && 
+          connectionDetails.relayStatus === 'direct_to_base') {
+        console.log('Polling for available relays...');
+        
+        socketRef.current.emit('getAvailableRelays', {}, (response) => {
+          if (response && response.relays && response.relays.length > 0) {
+            console.log('Found available relays:', response.relays);
+            
+            // Cache relay information
+            localStorage.setItem('whispernetRelayCache', JSON.stringify({
+              timestamp: Date.now(),
+              relays: response.relays
+            }));
+            
+            // Connect to a relay
+            connectToRelay(response.relays);
+            
+            // Clear polling interval
+            clearInterval(window.relayPollingInterval);
+          } else {
+            console.log('No relays available, continuing to use base node');
+          }
+        });
+      }
+    }, 30000); // Poll every 30 seconds
+    
+    // Clean up on component unmount
+    return () => {
+      if (window.relayPollingInterval) {
+        clearInterval(window.relayPollingInterval);
+      }
+    };
   };
 
   const connectSocketEvents = () => {
@@ -737,19 +795,54 @@ function App() {
       console.log('User status update:', data);
       const { username: user, online } = data;
       
+      // If this is our current recipient, update their status
       if (user === recipient) {
-        setRecipientStatus(prev => ({ ...prev, online }));
+        console.log(`Updating status for current recipient ${user} to ${online ? 'online' : 'offline'}`);
+        setRecipientStatus(prev => ({ 
+          ...prev, 
+          exists: true, // If we got a status update, the user definitely exists
+          online,
+          notRegisteredYet: false // Clear this flag since we know the user exists
+        }));
       }
       
       // Update online users list
       setOnlineUsers(prev => {
         if (online && !prev.includes(user)) {
+          console.log(`Adding ${user} to online users list`);
           return [...prev, user];
         } else if (!online && prev.includes(user)) {
+          console.log(`Removing ${user} from online users list`);
           return prev.filter(u => u !== user);
         }
         return prev;
       });
+      
+      // If we're currently checking a recipient, refresh their status
+      if (recipient) {
+        checkRecipientStatus();
+      }
+    });
+    
+    // Handle bulk online users updates
+    socketRef.current.on('onlineUsersUpdate', (data) => {
+      console.log('Online users update:', data);
+      if (data && Array.isArray(data.users)) {
+        setOnlineUsers(data.users);
+        
+        // If we have a recipient, check if they're in the online users list
+        if (recipient && data.users.includes(recipient)) {
+          setRecipientStatus(prev => ({ 
+            ...prev, 
+            exists: true,
+            online: true,
+            notRegisteredYet: false
+          }));
+        } else if (recipient) {
+          // If recipient is not in the online users list, refresh their status
+          checkRecipientStatus();
+        }
+      }
     });
     
     // Typing indicators
@@ -787,26 +880,96 @@ function App() {
   const startPingInterval = () => {
     pingIntervalRef.current = setInterval(() => {
       if (socketRef.current && socketRef.current.connected) {
+        // Send ping to keep connection alive
         socketRef.current.emit('ping', {}, (response) => {
           if (response) {
             console.log('Ping response:', response);
           }
         });
+        
+        // Also refresh online users list
+        getOnlineUsers();
+        
+        // If we have a recipient, check their status
+        if (recipient) {
+          checkRecipientStatus();
+        }
       }
-    }, 30000);
+    }, 30000); // Every 30 seconds
   };
 
   // Check recipient status
   const checkRecipientStatus = () => {
     if (!recipient || !socketRef.current) {
-      setRecipientStatus({ exists: false, online: false });
+      setRecipientStatus({ exists: false, online: false, checking: false });
       return;
     }
     
-    socketRef.current.emit('checkUser', { username: recipient }, (response) => {
-      console.log('Recipient check response:', response);
-      setRecipientStatus(response || { exists: false, online: false });
-    });
+    console.log(`Checking status for recipient: ${recipient}`);
+    
+    // Set status to checking while we wait for the response
+    setRecipientStatus(prev => ({ ...prev, checking: true }));
+    
+    // Set a timeout to clear the checking status if we don't get a response
+    const checkingTimeout = setTimeout(() => {
+      setRecipientStatus(prev => {
+        if (prev.checking) {
+          return { ...prev, checking: false };
+        }
+        return prev;
+      });
+    }, 3000); // 3 seconds timeout
+    
+    // First check if the recipient is in the online users list
+    if (onlineUsers.includes(recipient)) {
+      clearTimeout(checkingTimeout);
+      console.log(`${recipient} found in online users list`);
+      setRecipientStatus({ exists: true, online: true, checking: false });
+      return;
+    }
+    
+    // If we're connected to a relay, use the checkRecipient event
+    if (connectionDetails.relayStatus === 'connected_to_relay') {
+      socketRef.current.emit('checkRecipient', { username: recipient }, (relayResponse) => {
+        clearTimeout(checkingTimeout);
+        console.log('Relay recipient check response:', relayResponse);
+        if (relayResponse && typeof relayResponse.exists === 'boolean') {
+          // Only update if we got a valid response
+          setRecipientStatus({
+            ...relayResponse,
+            checking: false
+          });
+        } else {
+          // If no valid response, mark as not found
+          setRecipientStatus({ 
+            exists: false, 
+            online: false, 
+            checking: false 
+          });
+        }
+      });
+    } else {
+      // If connected directly to base node, use checkUser
+      socketRef.current.emit('checkUser', { username: recipient }, (response) => {
+        clearTimeout(checkingTimeout);
+        console.log('Base node recipient check response:', response);
+        
+        // If we got a valid response, use it
+        if (response && typeof response.exists === 'boolean') {
+          setRecipientStatus({
+            ...response,
+            checking: false
+          });
+        } else {
+          // If no valid response, mark as not found
+          setRecipientStatus({ 
+            exists: false, 
+            online: false, 
+            checking: false 
+          });
+        }
+      });
+    }
   };
 
   // Effect to check recipient status whenever recipient changes
@@ -868,7 +1031,23 @@ function App() {
   };
 
   const handleRecipientChange = (e) => {
-    setRecipient(e.target.value.trim());
+    const newRecipient = e.target.value.trim();
+    setRecipient(newRecipient);
+    
+    // Reset recipient status when the recipient changes
+    setRecipientStatus({ exists: false, online: false, checking: false });
+    
+    // If the recipient is not empty, check their status
+    if (newRecipient && socketRef.current) {
+      // Use a small delay to avoid too many checks while typing
+      if (recipientCheckTimeoutRef.current) {
+        clearTimeout(recipientCheckTimeoutRef.current);
+      }
+      
+      recipientCheckTimeoutRef.current = setTimeout(() => {
+        checkRecipientStatus();
+      }, 500); // 500ms delay
+    }
   };
 
   const handleSend = async (e, bounce = false) => {
@@ -879,107 +1058,148 @@ function App() {
       // Show sending indicator
       setStatus('Sending message...');
       
-      // Check if recipient exists before sending
-      socketRef.current.emit('checkUser', { username: recipient }, async (recipientCheck) => {
-        if (!recipientCheck || !recipientCheck.exists) {
+      // If this is a relay/bounce message, we'll proceed regardless of recipient status
+      if (!bounce) {
+        // For direct messages, we need to check if the recipient exists and is online
+        const recipientOnline = recipientStatus.online;
+        
+        // If recipient is not online, suggest using relay
+        if (!recipientOnline) {
           setSecurityAlert({
             username: 'System',
-            message: `Recipient "${recipient}" does not exist.`,
-            type: 'error'
+            message: `${recipient} is offline or not found. Use the RELAY button to send a delayed message.`,
+            type: 'warning'
           });
           setStatus('Registered successfully');
           return;
         }
-        
-        // Get recipient's public key if we don't have it and encryption is enabled
-        if (encryptionEnabled && !publicKeys[recipient]) {
-          try {
-            await requestPublicKey(recipient);
-          } catch (error) {
-            console.error('Failed to get public key:', error);
-            // Continue without encryption if we can't get the key
-          }
+      }
+      
+      // Get recipient's public key if we don't have it and encryption is enabled
+      if (encryptionEnabled && !publicKeys[recipient]) {
+        try {
+          await requestPublicKey(recipient);
+        } catch (error) {
+          console.error('Failed to get public key:', error);
+          // Continue without encryption if we can't get the key
         }
-        
-        let finalMessage = message.trim();
-        let isEncrypted = false;
-        
-        // Encrypt the message if encryption is enabled and we have the recipient's public key
-        if (encryptionEnabled && publicKeys[recipient]) {
-          try {
-            finalMessage = await encryptMessage(message.trim(), publicKeys[recipient]);
-            isEncrypted = true;
-            console.log('Message encrypted successfully');
-          } catch (error) {
-            console.error('Failed to encrypt message:', error);
-            setSecurityAlert({
-              username: 'System',
-              message: 'Failed to encrypt message. Sending as plaintext.',
-              type: 'warning'
-            });
-          }
-        }
-        
-        const messageData = {
-          to: recipient,
-          message: finalMessage,
-          deviceId,
-          timestamp: new Date().toISOString(),
-          bounce: bounce,
-          encrypted: isEncrypted,
-          publicKey: keyPair?.publicKey // Send our public key with the message
-        };
-        
-        console.log('Sending message:', { 
-          ...messageData, 
-          message: isEncrypted ? '[ENCRYPTED]' : finalMessage 
-        });
-        
-        // Add a timeout to handle cases where the server doesn't respond
-        const messageTimeout = setTimeout(() => {
+      }
+      
+      let finalMessage = message.trim();
+      let isEncrypted = false;
+      
+      // Encrypt the message if encryption is enabled and we have the recipient's public key
+      if (encryptionEnabled && publicKeys[recipient]) {
+        try {
+          finalMessage = await encryptMessage(message.trim(), publicKeys[recipient]);
+          isEncrypted = true;
+          console.log('Message encrypted successfully');
+        } catch (error) {
+          console.error('Failed to encrypt message:', error);
           setSecurityAlert({
             username: 'System',
-            message: 'Message sending timed out. Server may be offline.',
-            type: 'error'
+            message: 'Failed to encrypt message. Sending as plaintext.',
+            type: 'warning'
           });
-          setStatus('Registered successfully');
-        }, 10000);
+        }
+      }
+      
+      const messageData = {
+        to: recipient,
+        message: finalMessage,
+        deviceId,
+        timestamp: new Date().toISOString(),
+        bounce: bounce, // Always use the bounce parameter directly
+        encrypted: isEncrypted,
+        publicKey: keyPair?.publicKey // Send our public key with the message
+      };
+      
+      console.log('Sending message:', { 
+        ...messageData, 
+        message: isEncrypted ? '[ENCRYPTED]' : finalMessage,
+        bounce: bounce
+      });
+      
+      // Add a timeout to handle cases where the server doesn't respond
+      const messageTimeout = setTimeout(() => {
+        setSecurityAlert({
+          username: 'System',
+          message: 'Message sending timed out. Server may be offline.',
+          type: 'error'
+        });
+        setStatus('Registered successfully');
+      }, 10000);
+      
+      socketRef.current.emit('sendMessage', messageData, (response) => {
+        clearTimeout(messageTimeout);
+        console.log('Send message response:', response);
+        setStatus('Registered successfully');
         
-        socketRef.current.emit('sendMessage', messageData, (response) => {
-          clearTimeout(messageTimeout);
-          console.log('Send message response:', response);
-          setStatus('Registered successfully');
+        if (response && (response.delivered || response.bounced)) {
+          // Add message to local state (store original message for display)
+          setMessages(msgs => [...msgs, { 
+            from: username, 
+            message: message.trim(), // Store original message for display
+            fromDeviceId: deviceId, 
+            timestamp: new Date(),
+            status: response.delivered ? 'delivered' : 'bounced',
+            expiresAt: response.expiresAt,
+            encrypted: isEncrypted
+          }]);
+          setMessage('');
           
-          if (response && (response.delivered || response.bounced)) {
-            // Add message to local state (store original message for display)
-            setMessages(msgs => [...msgs, { 
-              from: username, 
-              message: message.trim(), // Store original message for display
-              fromDeviceId: deviceId, 
-              timestamp: new Date(),
-              status: response.delivered ? 'delivered' : 'bounced',
-              expiresAt: response.expiresAt,
-              encrypted: isEncrypted
-            }]);
-            setMessage('');
-            
-            // Show notification if message was bounced
-            if (response.bounced) {
+          // Show notification if message was bounced
+          if (response.bounced) {
+            setSecurityAlert({
+              username: 'System',
+              message: `Message to ${recipient} will be delivered when they come online (expires in 4 hours)`,
+              type: 'info'
+            });
+          }
+        } else {
+          const errorMsg = response?.reason || 'Message delivery failed';
+          
+          if (errorMsg.includes('not found') || errorMsg.includes('User not found')) {
+            if (bounce) {
+              // For bounced messages to non-existent users, show a special message
               setSecurityAlert({
                 username: 'System',
-                message: `Message to ${recipient} will be delivered when they come online (expires in 4 hours)`,
+                message: `Message will be delivered if ${recipient} registers within 4 hours.`,
                 type: 'info'
               });
+              
+              // Add message to local state as bounced
+              setMessages(msgs => [...msgs, { 
+                from: username, 
+                message: message.trim(),
+                fromDeviceId: deviceId, 
+                timestamp: new Date(),
+                status: 'bounced',
+                expiresAt: Date.now() + 14400000, // 4 hours
+                encrypted: isEncrypted
+              }]);
+              setMessage('');
+            } else {
+              setSecurityAlert({
+                username: 'System',
+                message: `${recipient} not found. Use the RELAY button to send a message that will be delivered if they register.`,
+                type: 'warning'
+              });
             }
+          } else if (errorMsg.includes('offline')) {
+            setSecurityAlert({
+              username: 'System',
+              message: `${recipient} is offline. Use the RELAY button to send a delayed message.`,
+              type: 'warning'
+            });
           } else {
-            const errorMsg = response?.reason || 'Message delivery failed';
             setSecurityAlert({
               username: 'System',
               message: `Failed to send message: ${errorMsg}`,
               type: 'error'
             });
           }
-        });
+        }
       });
     } catch (error) {
       console.error('Error sending message:', error);
@@ -1024,15 +1244,17 @@ function App() {
     });
   };
   
-  // Handle relay bounce for offline users
+  // Handle relay bounce for any user
   const handleRelayBounce = (e) => {
     e.preventDefault();
     if (!recipient || !message.trim() || !socketRef.current) return;
     
     // Show confirmation before bouncing
     const confirmBounce = window.confirm(
-      `Send message to offline user "${recipient}"?\n\n` +
-      `The message will be stored on relay servers for up to 4 hours or until delivery.`
+      `RELAY MESSAGE\n\n` +
+      `Your message to "${recipient}" will be stored on ${connectionDetails.relayStatus === 'connected_to_relay' ? 'relay' : 'base node'} servers for up to 4 hours.\n\n` +
+      `It will be delivered when ${recipient} comes online or registers with the network.\n\n` +
+      `Continue?`
     );
     
     if (confirmBounce) {
@@ -1172,9 +1394,6 @@ function App() {
               color: relayStatus === 'online' ? '#bae67e' : '#ff8f40'
             }}>{relayStatus}</span></div>
             {deviceId && <div>Device ID: {deviceId.substring(0, 8)}...</div>}
-            {connected && onlineUsers.length > 0 && (
-              <div style={{ marginTop: 8 }}>Online Users: {onlineUsers.join(', ')}</div>
-            )}
           </div>
         )}
         
@@ -1315,9 +1534,13 @@ function App() {
                                  recipientStatus.exists ? '#ff8f40' : '#ff3333',
                       marginRight: 6 
                     }}></div>
-                    {recipientStatus.exists 
-                      ? (recipientStatus.online ? 'ONLINE' : 'OFFLINE') 
-                      : 'NOT FOUND'}
+                    <span style={{
+                      fontSize: 12,
+                      color: recipientStatus.online ? '#bae67e' : 
+                            recipientStatus.exists ? '#ff8f40' : '#ff3333'
+                    }}>
+                      {recipientStatus.online ? 'ONLINE' : 'OFFLINE'}
+                    </span>
                   </div>
                 )}
               </div>
@@ -1339,56 +1562,74 @@ function App() {
                   onChange={handleMessageChange}
                   required
                 />
-                {recipientStatus.exists && !recipientStatus.online ? (
+                {recipient ? (
                   <div style={{ display: 'flex' }}>
+                    {/* SEND button */}
+                    <button 
+                      style={{ 
+                        padding: '0 18px', 
+                        borderRadius: '4px 0 0 4px', 
+                        background: recipientStatus.online ? 
+                          'linear-gradient(90deg, #5ccfe6, #bae67e)' : 
+                          '#636b78', 
+                        color: '#171c28', 
+                        fontWeight: 'bold', 
+                        fontSize: 14, 
+                        border: 'none',
+                        cursor: recipientStatus.online ? 'pointer' : 'not-allowed',
+                        fontFamily: '"Fira Code", monospace'
+                      }} 
+                      type="submit"
+                      disabled={!recipientStatus.online}
+                      title={recipientStatus.online ? "Send message directly" : "User is offline or not found"}
+                    >
+                      SEND
+                    </button>
+                    
+                    {/* Always show the RELAY button */}
                     <button 
                       style={{ 
                         padding: '0 12px', 
-                        borderRadius: '4px 0 0 4px', 
+                        borderRadius: '0 4px 4px 0', 
                         background: '#4b1c1c', 
                         color: '#ff8f40', 
                         fontWeight: 'bold', 
                         fontSize: 14, 
                         border: 'none',
                         cursor: 'pointer',
-                        fontFamily: '"Fira Code", monospace'
+                        fontFamily: '"Fira Code", monospace',
+                        display: 'flex',
+                        alignItems: 'center'
                       }} 
                       onClick={handleRelayBounce}
                       title="Message will be stored on relay servers for up to 4 hours"
                     >
                       RELAY
+                      <span style={{
+                        fontSize: 10,
+                        marginLeft: 4,
+                        background: 'rgba(255, 143, 64, 0.2)',
+                        padding: '1px 3px',
+                        borderRadius: 2
+                      }}>
+                        4h
+                      </span>
                     </button>
-                    <div style={{
-                      fontSize: 10,
-                      padding: '2px 6px',
-                      background: '#0d1117',
-                      color: '#636b78',
-                      border: '1px solid #4b1c1c',
-                      borderLeft: 'none',
-                      borderRadius: '0 4px 4px 0',
-                      display: 'flex',
-                      alignItems: 'center'
-                    }}>
-                      4h
-                    </div>
                   </div>
                 ) : (
                   <button 
                     style={{ 
                       padding: '0 18px', 
                       borderRadius: 4, 
-                      background: recipientStatus.online ? 
-                        'linear-gradient(90deg, #5ccfe6, #bae67e)' : 
-                        '#636b78', 
+                      background: '#636b78', 
                       color: '#171c28', 
                       fontWeight: 'bold', 
                       fontSize: 14, 
                       border: 'none',
-                      cursor: recipientStatus.online ? 'pointer' : 'not-allowed',
+                      cursor: 'not-allowed',
                       fontFamily: '"Fira Code", monospace'
                     }} 
-                    type="submit"
-                    disabled={!recipientStatus.online}
+                    disabled={true}
                   >
                     SEND
                   </button>
