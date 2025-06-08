@@ -205,26 +205,10 @@ io.on('connection', (socket) => {
     const user = userRegistry[username];
     const response = { 
       exists: !!user, 
-      online: user?.online || false,
-      relayId: user?.relayId || null
+      online: user?.online || false 
     };
     console.log(`User check for ${username}:`, response);
-    
-    // Even if the user doesn't exist in our registry, we'll allow messages to be sent
-    // This helps with the case where a user might register later
-    if (ack) {
-      if (user) {
-        ack(response);
-      } else {
-        // If user doesn't exist, we'll still return a positive response
-        // but mark them as not registered yet
-        ack({ 
-          exists: false, 
-          online: false, 
-          notRegisteredYet: true 
-        });
-      }
-    }
+    if (ack) ack(response);
   });
 
   // Handle user registration (can be from relay or direct client)

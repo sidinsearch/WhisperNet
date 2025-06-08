@@ -1262,29 +1262,22 @@ function App() {
     // Check if the recipient is in the online users list
     const isOnline = onlineUsers.includes(recipient);
     
-    // First update based on our local knowledge
-    setRecipientStatus(prev => ({
-      ...prev,
-      online: isOnline
-    }));
-    
-    // Then check with the server for the most accurate information
-    socketRef.current.emit('checkRecipient', { username: recipient }, (response) => {
-      console.log('Check recipient response:', response);
+    // Check if the user exists
+    socketRef.current.emit('checkUser', { username: recipient }, (response) => {
+      console.log('Check user response:', response);
       
-      if (response) {
-        // Update with the server's response
+      if (response && response.exists) {
         setRecipientStatus({ 
-          exists: response.exists || false, 
-          online: response.online || false,
-          notRegisteredYet: !response.exists,
-          location: response.location || 'unknown'
+          exists: true, 
+          online: isOnline,
+          notRegisteredYet: false
         });
-        
-        // If the user is online according to the server but not in our list, add them
-        if (response.online && !onlineUsers.includes(recipient)) {
-          setOnlineUsers(prev => [...prev, recipient]);
-        }
+      } else {
+        setRecipientStatus({ 
+          exists: false, 
+          online: false,
+          notRegisteredYet: true
+        });
       }
     });
   };
@@ -1313,26 +1306,21 @@ function App() {
       // Show sending indicator
       setStatus('Sending message...');
       
-      // Always allow sending messages, regardless of recipient status
-      // This fixes the issue where users can't send messages even when the recipient is online
-      
-      // If this is not a bounce message and the recipient appears offline,
-      // do a quick check to verify their status
-      if (!bounce && !recipientStatus.online) {
-        // Check recipient status one more time before proceeding
-        await new Promise(resolve => {
-          socketRef.current.emit('checkRecipient', { username: recipient }, (response) => {
-            console.log('Final recipient check before sending:', response);
-            if (response && response.exists) {
-              setRecipientStatus(prev => ({
-                ...prev,
-                exists: true,
-                online: response.online || false
-              }));
-            }
-            resolve();
+      // If this is a relay/bounce message, we'll proceed regardless of recipient status
+      if (!bounce) {
+        // For direct messages, we need to check if the recipient exists and is online
+        const recipientOnline = recipientStatus.online;
+        
+        // If recipient is not online, suggest using relay
+        if (!recipientOnline) {
+          setSecurityAlert({
+            username: 'System',
+            message: `${recipient} is offline or not found. Use the RELAY button to send a delayed message.`,
+            type: 'warning'
           });
-        });
+          setStatus('Registered successfully');
+          return;
+        }
       }
       
       // Get recipient's public key if we don't have it and encryption is enabled

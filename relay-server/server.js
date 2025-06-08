@@ -296,11 +296,11 @@ io.on('connection', (socket) => {
   
   // Check if a recipient exists and is online
   socket.on('checkRecipient', ({ username }, ack) => {
-    console.log(`Checking recipient status for ${username}...`);
+    console.log(`Checking recipient status...`);
     
     // First check locally
     if (userSockets[username]) {
-      console.log(`Recipient ${username} found locally and is online`);
+      console.log(`Recipient found locally and is online`);
       if (ack) ack({ exists: true, online: true, location: 'local' });
       return;
     }
@@ -318,24 +318,11 @@ io.on('connection', (socket) => {
       console.log(`Checking ${username} with base node`);
       baseSocket.emit('checkUser', { username }, (response) => {
         console.log(`Base node response for ${username}:`, response);
-        
-        // If the user exists on the base node, they're considered valid
-        if (response && response.exists) {
-          if (ack) ack({ 
-            exists: true, 
-            online: response.online || false,
-            location: 'remote'
-          });
-        } else {
-          // If the user doesn't exist on the base node, we'll still allow messages
-          // to be sent, but mark them as potentially not registered yet
-          if (ack) ack({ 
-            exists: true, 
-            online: false, 
-            location: 'unknown', 
-            notRegisteredYet: true 
-          });
-        }
+        if (ack) ack({ 
+          exists: response?.exists || false, 
+          online: response?.online || false,
+          location: 'remote'
+        });
       });
     } else {
       // If base node is not available, assume user might exist

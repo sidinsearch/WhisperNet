@@ -271,24 +271,15 @@ const ChatInterface = ({
                     borderRadius: '50%', 
                     background: recipientStatus.online ? '#bae67e' : 
                                recipientStatus.exists ? '#ff8f40' : '#ff3333',
-                    marginRight: 6,
-                    animation: recipientStatus.online ? 'pulse 2s infinite' : 'none'
+                    marginRight: 6 
                   }}></div>
                   <span style={{
                     fontSize: 12,
                     color: recipientStatus.online ? '#bae67e' : 
                           recipientStatus.exists ? '#ff8f40' : '#ff3333'
                   }}>
-                    {recipientStatus.online ? 'ONLINE' : 
-                     recipientStatus.exists ? 'OFFLINE (MESSAGES WILL BE QUEUED)' : 'USER NOT FOUND'}
+                    {recipientStatus.online ? 'ONLINE' : 'OFFLINE'}
                   </span>
-                  <style jsx="true">{`
-                    @keyframes pulse {
-                      0% { opacity: 1; }
-                      50% { opacity: 0.5; }
-                      100% { opacity: 1; }
-                    }
-                  `}</style>
                 </div>
               )}
             </div>
@@ -313,21 +304,24 @@ const ChatInterface = ({
               required
             />
             <div style={{ display: 'flex' }}>
-              {/* SEND button - always enabled */}
+              {/* SEND button */}
               <button 
                 style={{ 
                   padding: '0 18px', 
                   borderRadius: '4px 0 0 4px', 
-                  background: 'linear-gradient(90deg, #5ccfe6, #bae67e)', 
+                  background: recipientStatus.online ? 
+                    'linear-gradient(90deg, #5ccfe6, #bae67e)' : 
+                    '#636b78', 
                   color: '#171c28', 
                   fontWeight: 'bold', 
                   fontSize: 14, 
                   border: 'none',
-                  cursor: 'pointer',
+                  cursor: recipientStatus.online ? 'pointer' : 'not-allowed',
                   fontFamily: '"Fira Code", monospace'
                 }} 
                 type="submit"
-                title="Send message directly"
+                disabled={!recipientStatus.online}
+                title={recipientStatus.online ? "Send message directly" : "User is offline or not found"}
               >
                 SEND
               </button>
