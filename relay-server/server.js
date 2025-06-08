@@ -48,6 +48,32 @@ let relayId = null;
 const userSockets = {}; // username -> socket
 const socketUsers = {}; // socket.id -> { username, deviceId, status }
 
+// Storage for pending messages (relay bounce system)
+const pendingMessages = {}; // username -> [{ from, message, fromDeviceId, timestamp, expiresAt }]
+
+// Function to clean up expired messages
+const cleanupExpiredMessages = () => {
+  const now = Date.now();
+  let cleanedCount = 0;
+  
+  for (const username in pendingMessages) {
+    const userMessages = pendingMessages[username];
+    const validMessages = userMessages.filter(msg => msg.expiresAt > now);
+    
+    cleanedCount += (userMessages.length - validMessages.length);
+    
+    if (validMessages.length === 0) {
+      delete pendingMessages[username];
+    } else {
+      pendingMessages[username] = validMessages;
+    }
+  }
+  
+  if (cleanedCount > 0) {
+    console.log(`Cleaned up ${cleanedCount} expired messages`);
+  }
+};
+
 // Base node connection
 let baseSocket = null;
 let reconnectAttempts = 0;
@@ -77,6 +103,15 @@ const connectToBaseNode = () => {
       if (response && response.success) {
         relayId = response.relayId || `${RELAY_IP}:${RELAY_PORT}`;
         console.log(`Relay registered with ID: ${relayId}`);
+        
+        // Send a heartbeat immediately to ensure the base node has our status
+        baseSocket.emit('relayHeartbeat', { 
+          relayId: relayId,
+          ip: RELAY_IP, 
+          port: RELAY_PORT,
+          connectedUsers: Object.keys(userSockets).length,
+          status: 'online'
+        });
       } else {
         console.error('Failed to register relay:', response);
       }
@@ -97,18 +132,40 @@ const connectToBaseNode = () => {
   });
 
   // Handle message delivery from base node
-  baseSocket.on('deliverMessage', ({ from, to, message, fromDeviceId }) => {
+  baseSocket.on('deliverMessage', ({ from, to, message, fromDeviceId, timestamp, encrypted, publicKey }) => {
     console.log(`Delivering message from base node: ${from} -> ${to}`);
     
     if (userSockets[to]) {
       userSockets[to].emit('receiveMessage', { 
         from, 
         message, 
-        fromDeviceId 
+        fromDeviceId,
+        timestamp: timestamp || new Date().toISOString(),
+        encrypted,
+        publicKey
       });
       console.log(`Message delivered to ${to}`);
     } else {
       console.log(`User ${to} not found on this relay`);
+      
+      // Store the message for later delivery if the user connects to this relay
+      const expiresAt = Date.now() + 14400000; // 4 hours
+      
+      if (!pendingMessages[to]) {
+        pendingMessages[to] = [];
+      }
+      
+      pendingMessages[to].push({
+        from,
+        message,
+        fromDeviceId,
+        timestamp: timestamp || new Date().toISOString(),
+        expiresAt,
+        encrypted,
+        publicKey
+      });
+      
+      console.log(`Message from ${from} to ${to} queued for later delivery`);
     }
   });
 
@@ -124,10 +181,16 @@ const heartbeatInterval = setInterval(() => {
     baseSocket.emit('relayHeartbeat', { 
       relayId: relayId,
       ip: RELAY_IP, 
-      port: RELAY_PORT 
+      port: RELAY_PORT,
+      connectedUsers: Object.keys(userSockets).length,
+      status: 'online',
+      pendingMessageCount: Object.values(pendingMessages).reduce((acc, msgs) => acc + msgs.length, 0)
     });
   }
 }, 10000); // Every 10 seconds
+
+// Clean up expired messages every minute
+const cleanupInterval = setInterval(cleanupExpiredMessages, 60000);
 
 // Handle client connections
 io.on('connection', (socket) => {
@@ -165,6 +228,26 @@ io.on('connection', (socket) => {
           };
           
           console.log(`User ${username} registered successfully`);
+          
+          // Check for pending messages
+          if (pendingMessages[username] && pendingMessages[username].length > 0) {
+            console.log(`Delivering ${pendingMessages[username].length} pending messages to ${username}`);
+            
+            // Deliver all pending messages
+            pendingMessages[username].forEach(msg => {
+              socket.emit('receiveMessage', {
+                from: msg.from,
+                message: msg.message,
+                fromDeviceId: msg.fromDeviceId,
+                timestamp: msg.timestamp,
+                bounced: true
+              });
+            });
+            
+            // Clear pending messages for this user
+            delete pendingMessages[username];
+          }
+          
           if (ack) ack({ success: true });
         } else {
           console.log(`Base node rejected registration for ${username}:`, response?.reason);
@@ -183,6 +266,25 @@ io.on('connection', (socket) => {
         deviceId,
         status: 'online'
       };
+      
+      // Check for pending messages
+      if (pendingMessages[username] && pendingMessages[username].length > 0) {
+        console.log(`Delivering ${pendingMessages[username].length} pending messages to ${username}`);
+        
+        // Deliver all pending messages
+        pendingMessages[username].forEach(msg => {
+          socket.emit('receiveMessage', {
+            from: msg.from,
+            message: msg.message,
+            fromDeviceId: msg.fromDeviceId,
+            timestamp: msg.timestamp,
+            bounced: true
+          });
+        });
+        
+        // Clear pending messages for this user
+        delete pendingMessages[username];
+      }
       
       if (ack) ack({ success: true, warning: 'Registered locally only - base node not available' });
     }
@@ -211,7 +313,7 @@ io.on('connection', (socket) => {
   });
   
   // Handle message sending
-  socket.on('sendMessage', ({ to, message, deviceId }, ack) => {
+  socket.on('sendMessage', ({ to, message, deviceId, bounce = false, encrypted = false, publicKey = null, timestamp = null }, ack) => {
     const fromUser = socketUsers[socket.id];
     if (!fromUser) {
       console.log('Message from unregistered user');
@@ -219,7 +321,7 @@ io.on('connection', (socket) => {
       return;
     }
     
-    console.log(`Message from ${fromUser.username} to ${to}: ${message}`);
+    console.log(`Message from ${fromUser.username} to ${to}: ${encrypted ? '[ENCRYPTED]' : message}`);
     
     // Check if recipient is connected to this relay
     if (userSockets[to]) {
@@ -227,7 +329,11 @@ io.on('connection', (socket) => {
       userSockets[to].emit('receiveMessage', {
         from: fromUser.username,
         message,
-        fromDeviceId: deviceId || fromUser.deviceId
+        fromDeviceId: deviceId || fromUser.deviceId,
+        timestamp: timestamp || new Date().toISOString(),
+        encrypted,
+        publicKey,
+        bounced: false
       });
       
       console.log(`Message delivered locally to ${to}`);
@@ -239,21 +345,80 @@ io.on('connection', (socket) => {
           from: fromUser.username,
           to,
           message,
-          deviceId: deviceId || fromUser.deviceId
+          deviceId: deviceId || fromUser.deviceId,
+          encrypted,
+          publicKey,
+          timestamp: timestamp || new Date().toISOString()
         }, (response) => {
           console.log(`Message routing result:`, response);
-          if (ack) ack({ 
-            delivered: response?.delivered || false, 
-            reason: response?.reason,
-            method: 'routed'
-          });
+          
+          // If delivery failed and bounce is requested, store the message for later delivery
+          if (!response?.delivered && bounce) {
+            // Store message for 4 hours (14400000 ms)
+            const expiresAt = Date.now() + 14400000;
+            
+            if (!pendingMessages[to]) {
+              pendingMessages[to] = [];
+            }
+            
+            pendingMessages[to].push({
+              from: fromUser.username,
+              message,
+              fromDeviceId: deviceId || fromUser.deviceId,
+              timestamp: timestamp || new Date().toISOString(),
+              expiresAt,
+              encrypted,
+              publicKey
+            });
+            
+            console.log(`Message queued for ${to}, will expire in 4 hours`);
+            if (ack) ack({ 
+              delivered: false, 
+              bounced: true,
+              expiresAt,
+              reason: 'Message queued for later delivery'
+            });
+          } else {
+            if (ack) ack({ 
+              delivered: response?.delivered || false, 
+              reason: response?.reason,
+              method: 'routed'
+            });
+          }
         });
       } else {
-        console.log('Cannot route message - base node not connected');
-        if (ack) ack({ 
-          delivered: false, 
-          reason: 'Base node not available for routing' 
-        });
+        // If base node is not available and bounce is requested, store locally
+        if (bounce) {
+          const expiresAt = Date.now() + 14400000; // 4 hours
+          
+          if (!pendingMessages[to]) {
+            pendingMessages[to] = [];
+          }
+          
+          pendingMessages[to].push({
+            from: fromUser.username,
+            message,
+            fromDeviceId: deviceId || fromUser.deviceId,
+            timestamp: timestamp || new Date().toISOString(),
+            expiresAt,
+            encrypted,
+            publicKey
+          });
+          
+          console.log(`Message queued locally for ${to}, will expire in 4 hours`);
+          if (ack) ack({ 
+            delivered: false, 
+            bounced: true,
+            expiresAt,
+            reason: 'Message queued locally for later delivery'
+          });
+        } else {
+          console.log('Cannot route message - base node not connected');
+          if (ack) ack({ 
+            delivered: false, 
+            reason: 'Base node not available for routing' 
+          });
+        }
       }
     }
   });
@@ -267,16 +432,111 @@ io.on('connection', (socket) => {
     }
   });
   
+  // Handle explicit user logout
+  socket.on('userLogout', ({ username, deviceId }, ack) => {
+    console.log(`User ${username} (${deviceId}) explicitly logged out`);
+    
+    const user = socketUsers[socket.id];
+    if (user && user.username === username) {
+      // Remove from our local registry
+      delete userSockets[username];
+      delete socketUsers[socket.id];
+      
+      // Notify base node if connected
+      if (baseSocket && baseSocket.connected) {
+        baseSocket.emit('userLogout', { 
+          username, 
+          deviceId,
+          relayId 
+        });
+        
+        console.log(`Notified base node about logout of ${username}`);
+      }
+      
+      // Notify other users about the status change
+      io.emit('userStatusUpdate', { username, online: false });
+    }
+    
+    if (ack) ack({ success: true });
+  });
+  
+  // Handle public key requests
+  socket.on('requestPublicKey', ({ username }, ack) => {
+    const fromUser = socketUsers[socket.id];
+    if (!fromUser) {
+      if (ack) ack({ success: false, reason: 'Not registered' });
+      return;
+    }
+    
+    console.log(`Public key request from ${fromUser.username} for ${username}`);
+    
+    // Check if user is connected to this relay
+    if (userSockets[username]) {
+      // Request the public key from the user
+      userSockets[username].emit('publicKeyRequest', { from: fromUser.username }, (response) => {
+        if (response && response.publicKey) {
+          console.log(`Received public key for ${username}, forwarding to ${fromUser.username}`);
+          if (ack) ack({ success: true, publicKey: response.publicKey });
+        } else {
+          console.log(`No public key available for ${username}`);
+          if (ack) ack({ success: false, reason: 'Public key not available' });
+        }
+      });
+    } else if (baseSocket && baseSocket.connected) {
+      // Try to get the key through the base node
+      baseSocket.emit('requestPublicKey', { from: fromUser.username, username }, (response) => {
+        if (response && response.publicKey) {
+          console.log(`Received public key for ${username} from base node`);
+          if (ack) ack({ success: true, publicKey: response.publicKey });
+        } else {
+          console.log(`No public key available for ${username} from base node`);
+          if (ack) ack({ success: false, reason: response?.reason || 'Public key not available' });
+        }
+      });
+    } else {
+      console.log(`Cannot request public key - user not found and base node not connected`);
+      if (ack) ack({ success: false, reason: 'User not found and base node not available' });
+    }
+  });
+  
   // Get relay information
   socket.on('getRelayInfo', (_, ack) => {
-    if (ack) ack({ 
-      url: `${RELAY_IP}:${RELAY_PORT}`,
-      ip: RELAY_IP,
-      port: RELAY_PORT,
-      status: baseSocket?.connected ? 'connected' : 'disconnected',
-      baseNodeUrl: BASE_NODE_URL,
-      relayId: relayId
-    });
+    if (ack) {
+      const info = {
+        relayId: relayId || `${RELAY_IP}:${RELAY_PORT}`,
+        ip: RELAY_IP,
+        port: RELAY_PORT,
+        status: baseSocket?.connected ? 'connected_to_base' : 'standalone',
+        baseNodeUrl: BASE_NODE_URL,
+        connectedUsers: Object.keys(userSockets).length,
+        connectedUsersList: Object.keys(userSockets),
+        uptime: process.uptime(),
+        pendingMessageCount: Object.values(pendingMessages).reduce((acc, msgs) => acc + msgs.length, 0)
+      };
+      console.log('Sending relay info:', info);
+      ack(info);
+    }
+  });
+  
+  // Get detailed relay status
+  socket.on('getRelayStatus', (_, ack) => {
+    if (ack) {
+      const status = {
+        relayId: relayId || `${RELAY_IP}:${RELAY_PORT}`,
+        ip: RELAY_IP,
+        port: RELAY_PORT,
+        baseNodeConnected: baseSocket?.connected || false,
+        baseNodeUrl: BASE_NODE_URL,
+        connectedUsers: Object.keys(userSockets).length,
+        connectedUsersList: Object.keys(userSockets),
+        pendingMessages: Object.keys(pendingMessages).map(username => ({
+          username,
+          messageCount: pendingMessages[username].length
+        })),
+        uptime: process.uptime()
+      };
+      ack(status);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -284,9 +544,32 @@ io.on('connection', (socket) => {
     
     const user = socketUsers[socket.id];
     if (user) {
-      console.log(`User ${user.username} disconnected`);
-      delete userSockets[user.username];
+      const { username, deviceId } = user;
+      console.log(`User ${username} (${deviceId}) disconnected`);
+      
+      // Remove from our local registry
+      delete userSockets[username];
       delete socketUsers[socket.id];
+      
+      // Notify base node if connected
+      if (baseSocket && baseSocket.connected) {
+        baseSocket.emit('userDisconnected', { 
+          username, 
+          deviceId,
+          relayId 
+        });
+        
+        console.log(`Notified base node about disconnection of ${username}`);
+      }
+      
+      // Notify other users about the status change
+      io.emit('userStatusUpdate', { username, online: false });
+      
+      // If there are pending messages for this user, keep them for a while
+      if (pendingMessages[username] && pendingMessages[username].length > 0) {
+        console.log(`Keeping ${pendingMessages[username].length} pending messages for ${username}`);
+        // They will be cleaned up by the regular cleanup interval
+      }
     }
   });
 });
