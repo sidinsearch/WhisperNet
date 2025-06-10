@@ -307,7 +307,7 @@ Messages are routed through the relay network using the following process:
 │         │                 ▲                  │             │
 │         │                 │                  │             │
 │         └─────────────────┘                  │             │
-│         3. Bounce if recipient offline       │            │
+│         3. Bounce if recipient offline       │             │
 │                                              │             │
 └──────────────────────────┬─────────────────────────────────┘
                            │
