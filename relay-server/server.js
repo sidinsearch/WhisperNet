@@ -42,7 +42,6 @@ let relayId = null;
 (async () => {
   RELAY_IP = await getExternalIP();
   console.log(`Relay IP determined as: ${RELAY_IP}`);
-  console.log(`Relay server started on port ${RELAY_PORT}`);
 })();
 
 // Storage for connected users
@@ -134,7 +133,7 @@ const connectToBaseNode = () => {
 
   // Handle message delivery from base node
   baseSocket.on('deliverMessage', ({ from, to, message, fromDeviceId, timestamp, encrypted, publicKey }) => {
-    console.log(`Delivering message from base node to local user`);
+    console.log(`Delivering message from base node: ${from} -> ${to}`);
     
     if (userSockets[to]) {
       userSockets[to].emit('receiveMessage', { 
@@ -145,9 +144,9 @@ const connectToBaseNode = () => {
         encrypted,
         publicKey
       });
-      console.log(`Message delivered to recipient`);
+      console.log(`Message delivered to ${to}`);
     } else {
-      console.log(`Recipient not found on this relay`);
+      console.log(`User ${to} not found on this relay`);
       
       // Store the message for later delivery if the user connects to this relay
       const expiresAt = Date.now() + 14400000; // 4 hours
@@ -166,7 +165,56 @@ const connectToBaseNode = () => {
         publicKey
       });
       
-      console.log(`Message queued for later delivery`);
+      console.log(`Message from ${from} to ${to} queued for later delivery`);
+    }
+  });
+  
+  // Handle user online notification from base node
+  baseSocket.on('userOnline', ({ username }) => {
+    console.log(`Base node notified that user ${username} is now online`);
+    
+    // Check if we have pending messages for this user
+    if (pendingMessages[username] && pendingMessages[username].length > 0) {
+      console.log(`We have ${pendingMessages[username].length} pending messages for ${username}`);
+      
+      if (userSockets[username]) {
+        // User is connected to this relay, deliver messages
+        console.log(`User ${username} is connected to this relay, delivering pending messages`);
+        pendingMessages[username].forEach(msg => {
+          userSockets[username].emit('receiveMessage', {
+            from: msg.from,
+            message: msg.message,
+            fromDeviceId: msg.fromDeviceId,
+            timestamp: msg.timestamp,
+            encrypted: msg.encrypted,
+            publicKey: msg.publicKey,
+            bounced: true
+          });
+        });
+        
+        // Clear pending messages for this user
+        delete pendingMessages[username];
+      } else {
+        // User is not connected to this relay, forward messages to base node
+        console.log(`User ${username} is not connected to this relay, forwarding pending messages to base node`);
+        
+        pendingMessages[username].forEach(msg => {
+          baseSocket.emit('routeMessage', {
+            from: msg.from,
+            to: username,
+            message: msg.message,
+            deviceId: msg.fromDeviceId,
+            timestamp: msg.timestamp,
+            encrypted: msg.encrypted,
+            publicKey: msg.publicKey
+          }, (response) => {
+            console.log(`Forwarded message routing result:`, response);
+          });
+        });
+        
+        // Clear pending messages for this user
+        delete pendingMessages[username];
+      }
     }
   });
 
@@ -199,8 +247,7 @@ io.on('connection', (socket) => {
 
   // Handle user registration
   socket.on('register', ({ username, deviceId }, ack) => {
-    console.log(`Registration request received (user ID: ${socket.id.substring(0, 6)}...)`);
-    // Privacy: Not logging actual username or device ID
+    console.log(`Registration request: ${username} with device ${deviceId}`);
     
     // Check if username is already taken locally
     const existingUser = Object.values(socketUsers).find(user => 
@@ -208,7 +255,7 @@ io.on('connection', (socket) => {
     );
     
     if (existingUser) {
-      console.log(`Registration failed: username already taken locally`);
+      console.log(`Username ${username} already taken locally`);
       if (ack) ack({ success: false, reason: 'Username already taken by another device on this relay' });
       return;
     }
@@ -229,12 +276,11 @@ io.on('connection', (socket) => {
             status: 'online'
           };
           
-          console.log(`User registered successfully (socket ID: ${socket.id.substring(0, 6)}...)`);
-          console.log(`Total users connected: ${Object.keys(userSockets).length}`);
+          console.log(`User ${username} registered successfully`);
           
           // Check for pending messages
           if (pendingMessages[username] && pendingMessages[username].length > 0) {
-            console.log(`Delivering ${pendingMessages[username].length} pending messages to user`);
+            console.log(`Delivering ${pendingMessages[username].length} pending messages to ${username}`);
             
             // Deliver all pending messages
             pendingMessages[username].forEach(msg => {
@@ -243,6 +289,8 @@ io.on('connection', (socket) => {
                 message: msg.message,
                 fromDeviceId: msg.fromDeviceId,
                 timestamp: msg.timestamp,
+                encrypted: msg.encrypted,
+                publicKey: msg.publicKey,
                 bounced: true
               });
             });
@@ -253,7 +301,7 @@ io.on('connection', (socket) => {
           
           if (ack) ack({ success: true });
         } else {
-          console.log(`Base node rejected registration:`, response?.reason);
+          console.log(`Base node rejected registration for ${username}:`, response?.reason);
           if (ack) ack({ 
             success: false, 
             reason: response?.reason || 'Registration failed' 
@@ -262,8 +310,7 @@ io.on('connection', (socket) => {
       });
     } else {
       // Base node not connected - register locally only
-      console.log(`Base node not connected, registering user locally`);
-      console.log(`Total users connected: ${Object.keys(userSockets).length + 1}`);
+      console.log(`Base node not connected, registering ${username} locally`);
       userSockets[username] = socket;
       socketUsers[socket.id] = { 
         username, 
@@ -273,7 +320,7 @@ io.on('connection', (socket) => {
       
       // Check for pending messages
       if (pendingMessages[username] && pendingMessages[username].length > 0) {
-        console.log(`Delivering ${pendingMessages[username].length} pending messages to user`);
+        console.log(`Delivering ${pendingMessages[username].length} pending messages to ${username}`);
         
         // Deliver all pending messages
         pendingMessages[username].forEach(msg => {
@@ -282,6 +329,8 @@ io.on('connection', (socket) => {
             message: msg.message,
             fromDeviceId: msg.fromDeviceId,
             timestamp: msg.timestamp,
+            encrypted: msg.encrypted,
+            publicKey: msg.publicKey,
             bounced: true
           });
         });
@@ -296,11 +345,11 @@ io.on('connection', (socket) => {
   
   // Check if a recipient exists and is online
   socket.on('checkRecipient', ({ username }, ack) => {
-    console.log(`Checking recipient status...`);
+    console.log(`Checking recipient status for: ${username}`);
     
     // First check locally
     if (userSockets[username]) {
-      console.log(`Recipient found locally and is online`);
+      console.log(`${username} found locally and is online`);
       if (ack) ack({ exists: true, online: true, location: 'local' });
       return;
     }
@@ -476,41 +525,6 @@ io.on('connection', (socket) => {
       
       // Notify other users about the status change
       io.emit('userStatusUpdate', { username, online: false });
-      
-      // Ensure the username is fully released
-      console.log(`Username ${username} has been released and is now available`);
-    } else {
-      // Handle case where the logout request comes from a different socket
-      // This can happen if the user is trying to login from a new device/session
-      if (userSockets[username]) {
-        console.log(`Handling logout for ${username} from a different socket`);
-        
-        // Get the device ID from our records
-        const existingDeviceId = Object.values(socketUsers).find(u => u.username === username)?.deviceId;
-        
-        // Remove from our local registry
-        delete userSockets[username];
-        
-        // Remove from socketUsers (need to find the socket ID first)
-        const socketId = Object.keys(socketUsers).find(id => socketUsers[id].username === username);
-        if (socketId) {
-          delete socketUsers[socketId];
-        }
-        
-        // Notify base node if connected
-        if (baseSocket && baseSocket.connected) {
-          baseSocket.emit('userLogout', { 
-            username, 
-            deviceId: existingDeviceId || deviceId,
-            relayId 
-          });
-          
-          console.log(`Notified base node about logout of ${username} from different socket`);
-        }
-        
-        // Notify other users about the status change
-        io.emit('userStatusUpdate', { username, online: false });
-      }
     }
     
     if (ack) ack({ success: true });
@@ -614,6 +628,76 @@ io.on('connection', (socket) => {
       ack(status);
     }
   });
+  
+  // Handle relay messages (messages to be stored and delivered when recipient comes online)
+  socket.on('relayMessage', ({ to, message, from, fromDeviceId, timestamp, publicKey, encrypted }, ack) => {
+    console.log(`Relay message from ${from} to ${to}: ${encrypted ? '[ENCRYPTED]' : message}`);
+    
+    const fromUser = socketUsers[socket.id];
+    if (!fromUser) {
+      console.log('Relay message from unregistered user');
+      if (ack) ack({ success: false, reason: 'Not registered' });
+      return;
+    }
+    
+    // Store message for 4 hours (14400000 ms)
+    const expiresAt = Date.now() + 14400000;
+    
+    if (!pendingMessages[to]) {
+      pendingMessages[to] = [];
+    }
+    
+    pendingMessages[to].push({
+      from,
+      message,
+      fromDeviceId,
+      timestamp: timestamp || new Date().toISOString(),
+      expiresAt,
+      encrypted,
+      publicKey
+    });
+    
+    console.log(`Relay message queued for ${to}, will expire in 4 hours`);
+    
+    // Check if recipient is connected to this relay
+    if (userSockets[to]) {
+      // Deliver immediately if recipient is online
+      userSockets[to].emit('receiveMessage', {
+        from,
+        message,
+        fromDeviceId,
+        timestamp: timestamp || new Date().toISOString(),
+        encrypted,
+        publicKey,
+        bounced: true
+      });
+      
+      console.log(`Relay message delivered immediately to ${to}`);
+      
+      // Remove from pending messages since it was delivered
+      pendingMessages[to] = pendingMessages[to].filter(msg => 
+        !(msg.from === from && msg.message === message && msg.timestamp === timestamp)
+      );
+      
+      if (ack) ack({ success: true, delivered: true });
+    } else {
+      // Notify base node about the pending message
+      if (baseSocket && baseSocket.connected) {
+        baseSocket.emit('pendingMessage', {
+          to,
+          from,
+          relayId
+        });
+      }
+      
+      if (ack) ack({ 
+        success: true, 
+        delivered: false,
+        expiresAt,
+        message: 'Message queued for delivery when recipient comes online'
+      });
+    }
+  });
 
   socket.on('disconnect', () => {
     console.log(`Client disconnected: ${socket.id}`);
@@ -646,25 +730,6 @@ io.on('connection', (socket) => {
         console.log(`Keeping ${pendingMessages[username].length} pending messages for ${username}`);
         // They will be cleaned up by the regular cleanup interval
       }
-      
-      // Set a timeout to ensure the username is fully released if the user doesn't reconnect
-      setTimeout(() => {
-        // Double-check that the user hasn't reconnected
-        if (!userSockets[username]) {
-          console.log(`Ensuring username ${username} is fully released after disconnect`);
-          
-          // Notify base node again to ensure username is released
-          if (baseSocket && baseSocket.connected) {
-            baseSocket.emit('userLogout', { 
-              username, 
-              deviceId,
-              relayId 
-            });
-            
-            console.log(`Sent final logout for ${username} to ensure username is released`);
-          }
-        }
-      }, 15000); // 15 seconds
     }
   });
 });

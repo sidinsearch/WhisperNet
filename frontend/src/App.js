@@ -2,20 +2,32 @@ import React, { useState, useRef, useEffect } from 'react';
 import io from 'socket.io-client';
 import axios from 'axios';
 import FingerprintJS from '@fingerprintjs/fingerprintjs';
-
-// Import components
-import ConnectionInfo from './components/ConnectionInfo';
-import SecurityAlert from './components/SecurityAlert';
-import LoginScreen from './components/LoginScreen';
-import ChatInterface from './components/ChatInterface';
-import AboutPage from './components/AboutPage';
+import ChatBox from './components/ChatBox';
+import UserList from './components/UserList';
+import VerificationModal from './components/VerificationModal';
+// Import the icon directly
+import appIcon from './assets/icon.png';
+import { 
+  saveChatHistory, 
+  loadChatHistory, 
+  getActiveChats, 
+  clearAllChatHistory,
+  saveUnreadCounts,
+  loadUnreadCounts,
+  resetUnreadCount,
+  incrementUnreadCount
+} from './utils/chatStorage';
+import {
+  storeVerifiedKey,
+  getVerifiedKey,
+  hasVerifiedKey,
+  verifyKey,
+  generateKeyFingerprint,
+  detectStorageReset,
+  clearAllVerifiedKeys
+} from './utils/keyVerification';
 
 const BASE_NODE_URL = process.env.REACT_APP_BASE_NODE_URL || "http://localhost:5000";
-
-// Storage keys
-const IDENTITY_STORAGE_KEY = 'whispernetKnownIdentities';
-const CHAT_HISTORY_KEY = 'whispernetChatHistory';
-const TRUST_STATUS_KEY = 'whispernetTrustStatus';
 
 // Encryption utilities
 const generateKeyPair = async () => {
@@ -56,7 +68,7 @@ const encryptMessage = async (message, publicKeyJwk) => {
       ["encrypt"]
     );
     
-    // Convert the message to an ArrayBuffer
+    // Convert the message to ArrayBuffer
     const encoder = new TextEncoder();
     const data = encoder.encode(message);
     
@@ -69,7 +81,7 @@ const encryptMessage = async (message, publicKeyJwk) => {
       data
     );
     
-    // Convert the encrypted data to a base64 string
+    // Convert the encrypted data to base64
     return btoa(String.fromCharCode(...new Uint8Array(encryptedData)));
   } catch (error) {
     console.error('Error encrypting message:', error);
@@ -91,12 +103,8 @@ const decryptMessage = async (encryptedMessage, privateKeyJwk) => {
       ["decrypt"]
     );
     
-    // Convert the base64 string to an ArrayBuffer
-    const encryptedData = new Uint8Array(
-      atob(encryptedMessage)
-        .split('')
-        .map(char => char.charCodeAt(0))
-    );
+    // Convert the base64 encrypted message to ArrayBuffer
+    const encryptedData = Uint8Array.from(atob(encryptedMessage), c => c.charCodeAt(0));
     
     // Decrypt the data
     const decryptedData = await window.crypto.subtle.decrypt(
@@ -107,55 +115,55 @@ const decryptMessage = async (encryptedMessage, privateKeyJwk) => {
       encryptedData
     );
     
-    // Convert the decrypted data to a string
+    // Convert the decrypted data to string
     const decoder = new TextDecoder();
     return decoder.decode(decryptedData);
   } catch (error) {
     console.error('Error decrypting message:', error);
-    throw error;
+    return '[Encrypted message - cannot decrypt]';
   }
 };
 
+// Initialize the fingerprint agent
+const fpPromise = FingerprintJS.load();
+
 function App() {
-  // Connection state
-  const [connected, setConnected] = useState(false);
   const [username, setUsername] = useState('');
-  const [deviceId, setDeviceId] = useState('');
-  const [status, setStatus] = useState('Initializing...');
-  const [relayStatus, setRelayStatus] = useState('checking');
-  const [relayServerUrl, setRelayServerUrl] = useState('');
-  const [connectionDetails, setConnectionDetails] = useState({});
-  const [showConnectionInfo, setShowConnectionInfo] = useState(false);
-  const [securityAlert, setSecurityAlert] = useState(null);
-  
-  // Message state
   const [recipient, setRecipient] = useState('');
   const [message, setMessage] = useState('');
   const [messages, setMessages] = useState([]);
+  const [connected, setConnected] = useState(false);
+  const [status, setStatus] = useState('Checking relay status...');
+  const [deviceId, setDeviceId] = useState('');
+  const [connectionDetails, setConnectionDetails] = useState({});
+  const [showConnectionInfo, setShowConnectionInfo] = useState(false);
+  const [showAboutPage, setShowAboutPage] = useState(false);
+  const [securityAlert, setSecurityAlert] = useState(null);
   const [typing, setTyping] = useState(false);
+  const [relayServerUrl, setRelayServerUrl] = useState('Unknown');
+  const [relayStatus, setRelayStatus] = useState('checking');
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [recipientStatus, setRecipientStatus] = useState({ exists: false, online: false });
   const [isCheckingUsername, setIsCheckingUsername] = useState(false);
   const [usernameAvailable, setUsernameAvailable] = useState(true);
-  
-  // Encryption state
   const [keyPair, setKeyPair] = useState(null);
-  const [publicKeys, setPublicKeys] = useState({});
+  const [publicKeys, setPublicKeys] = useState({}); // username -> publicKey
   const [encryptionEnabled, setEncryptionEnabled] = useState(true);
   const [encryptionStatus, setEncryptionStatus] = useState('initializing');
-  const [knownIdentities, setKnownIdentities] = useState({}); // username -> {deviceId, publicKey, firstSeen}
-  const [identityMismatch, setIdentityMismatch] = useState(null); // {username, originalDeviceId, newDeviceId, action}
-  const [showIdentityWarning, setShowIdentityWarning] = useState(false);
   
-  // New state variables for enhanced chat functionality
-  const [chatHistory, setChatHistory] = useState({}); // username -> array of messages
-  const [contacts, setContacts] = useState([]); // list of usernames the current user has chatted with
-  const [activeChat, setActiveChat] = useState(null); // currently selected chat
-  const [trustStatus, setTrustStatus] = useState({}); // username -> {trusted: boolean, keyExchanged: boolean, mutualMessaging: boolean}
-  const [showTrustWarning, setShowTrustWarning] = useState(false); // whether to show the trust warning for the current chat
+  // New state variables for chat management
+  const [activeChats, setActiveChats] = useState({}); // username -> boolean (is chat open)
+  const [chatMessages, setChatMessages] = useState({}); // username -> messages array
+  const [currentChat, setCurrentChat] = useState(null); // currently selected chat username
+  const [typingUsers, setTypingUsers] = useState({}); // username -> boolean (is typing)
+  const [recipientStatuses, setRecipientStatuses] = useState({}); // username -> status object
+  const [unreadCounts, setUnreadCounts] = useState({}); // username -> count
   
-  // UI state variables
-  const [showAboutPage, setShowAboutPage] = useState(false); // whether to show the About page
+  // Key verification state
+  const [verificationStatuses, setVerificationStatuses] = useState({}); // username -> verification status
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
+  const [currentVerification, setCurrentVerification] = useState(null);
+  const [storageResetDetected, setStorageResetDetected] = useState(false);
   
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -163,237 +171,141 @@ function App() {
   const pingIntervalRef = useRef(null);
   const recipientCheckTimeoutRef = useRef(null);
 
-  // Load known identities from localStorage
-  const loadKnownIdentities = () => {
-    try {
-      const storedIdentities = localStorage.getItem(IDENTITY_STORAGE_KEY);
-      if (storedIdentities) {
-        setKnownIdentities(JSON.parse(storedIdentities));
-      }
-    } catch (error) {
-      console.error('Error loading known identities:', error);
-    }
-  };
-  
-  // Save known identities to localStorage
-  const saveKnownIdentities = (identities) => {
-    try {
-      localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(identities));
-    } catch (error) {
-      console.error('Error saving known identities:', error);
-    }
-  };
-  
-  // Load chat history from localStorage
-  const loadChatHistory = () => {
-    try {
-      const storedChatHistory = localStorage.getItem(CHAT_HISTORY_KEY);
-      if (storedChatHistory) {
-        const parsedChatHistory = JSON.parse(storedChatHistory);
-        setChatHistory(parsedChatHistory);
+  // Get device fingerprint and initialize encryption on component mount
+  useEffect(() => {
+    const initializeDevice = async () => {
+      try {
+        // Check if localStorage has been reset
+        const isReset = detectStorageReset();
+        setStorageResetDetected(isReset);
         
-        // Extract contacts from chat history
-        const contactsList = Object.keys(parsedChatHistory);
-        setContacts(contactsList);
-        console.log('Loaded chat history for contacts:', contactsList.length);
-        
-        // If we have contacts but no active chat, set the first contact as active
-        if (contactsList.length > 0 && !activeChat) {
-          setActiveChat(contactsList[0]);
-          setRecipient(contactsList[0]);
+        if (isReset) {
+          setSecurityAlert({
+            username: 'System',
+            message: 'Your browser storage has been reset. You will need to verify contacts again.',
+            type: 'warning'
+          });
         }
-      }
-    } catch (error) {
-      console.error('Error loading chat history:', error);
-    }
-  };
-  
-  // Save chat history to localStorage
-  const saveChatHistory = (history) => {
-    try {
-      localStorage.setItem(CHAT_HISTORY_KEY, JSON.stringify(history));
-    } catch (error) {
-      console.error('Error saving chat history:', error);
-    }
-  };
-  
-  // Load trust status from localStorage
-  const loadTrustStatus = () => {
-    try {
-      const storedTrustStatus = localStorage.getItem(TRUST_STATUS_KEY);
-      if (storedTrustStatus) {
-        setTrustStatus(JSON.parse(storedTrustStatus));
-      }
-    } catch (error) {
-      console.error('Error loading trust status:', error);
-    }
-  };
-  
-  // Save trust status to localStorage
-  const saveTrustStatus = (status) => {
-    try {
-      localStorage.setItem(TRUST_STATUS_KEY, JSON.stringify(status));
-    } catch (error) {
-      console.error('Error saving trust status:', error);
-    }
-  };
-  
-  // Update chat history for a specific contact
-  const updateChatHistory = (contact, message) => {
-    setChatHistory(prevHistory => {
-      const updatedHistory = { ...prevHistory };
-      
-      // Initialize chat history for this contact if it doesn't exist
-      if (!updatedHistory[contact]) {
-        updatedHistory[contact] = [];
-      }
-      
-      // Add the message to the chat history
-      updatedHistory[contact] = [...updatedHistory[contact], message];
-      
-      // Save the updated chat history
-      saveChatHistory(updatedHistory);
-      
-      // Update contacts list if this is a new contact
-      if (!contacts.includes(contact)) {
-        const updatedContacts = [...contacts, contact];
-        setContacts(updatedContacts);
-      }
-      
-      return updatedHistory;
-    });
-  };
-  
-  // Check and update trust status for a contact
-  const updateTrustStatus = (contact, updates) => {
-    setTrustStatus(prevStatus => {
-      const updatedStatus = { ...prevStatus };
-      
-      // Initialize trust status for this contact if it doesn't exist
-      if (!updatedStatus[contact]) {
-        updatedStatus[contact] = {
-          trusted: false,
-          keyExchanged: false,
-          mutualMessaging: false,
-          sentMessage: false,
-          receivedMessage: false,
-          firstInteraction: new Date().toISOString()
-        };
-      }
-      
-      // Apply updates
-      updatedStatus[contact] = {
-        ...updatedStatus[contact],
-        ...updates
-      };
-      
-      // Check if mutual messaging has occurred
-      if (updatedStatus[contact].sentMessage && updatedStatus[contact].receivedMessage) {
-        updatedStatus[contact].mutualMessaging = true;
         
-        // If mutual messaging has occurred and we have their public key, mark as trusted and exchange keys
-        if (publicKeys[contact]) {
-          updatedStatus[contact].keyExchanged = true;
-          updatedStatus[contact].trusted = true;
+        // Get device fingerprint
+        const fp = await fpPromise;
+        const result = await fp.get();
+        const visitorId = result.visitorId;
+        setDeviceId(visitorId);
+        
+        // Initialize encryption
+        await initializeEncryption(visitorId);
+      } catch (error) {
+        console.error('Failed to initialize device:', error);
+        // Generate a fallback device ID
+        const fallbackId = 'fallback-' + Math.random().toString(36).substr(2, 9);
+        setDeviceId(fallbackId);
+        
+        // Initialize encryption with fallback ID
+        await initializeEncryption(fallbackId);
+      }
+    };
+    
+    initializeDevice();
+  }, []);
+  
+  // Initialize encryption
+  const initializeEncryption = async (deviceIdentifier) => {
+    try {
+      setEncryptionStatus('initializing');
+      
+      // Check if we have keys in localStorage
+      const storedKeys = localStorage.getItem(`whispernetKeys_${deviceIdentifier}`);
+      
+      if (storedKeys) {
+        // We have stored keys, check if they're valid
+        try {
+          const parsedKeys = JSON.parse(storedKeys);
           
-          // Update the UI to show trust status change
-          if (contact === recipient) {
-            setShowTrustWarning(false);
+          // Validate the keys by testing encryption/decryption
+          if (parsedKeys.publicKey && parsedKeys.privateKey) {
+            try {
+              // Test encryption with the stored keys
+              const testMessage = "test-encryption-" + Date.now();
+              const encrypted = await encryptMessage(testMessage, parsedKeys.publicKey);
+              const decrypted = await decryptMessage(encrypted, parsedKeys.privateKey);
+              
+              if (decrypted === testMessage) {
+                // Keys are valid
+                setKeyPair(parsedKeys);
+                console.log('Loaded and validated existing encryption keys');
+                setEncryptionStatus('ready');
+              } else {
+                console.warn('Stored keys failed validation test');
+                await generateAndStoreNewKeys(deviceIdentifier);
+              }
+            } catch (testError) {
+              console.error('Error testing stored keys:', testError);
+              await generateAndStoreNewKeys(deviceIdentifier);
+            }
+          } else {
+            console.warn('Stored keys are incomplete');
+            await generateAndStoreNewKeys(deviceIdentifier);
           }
+        } catch (parseError) {
+          console.error('Error parsing stored keys:', parseError);
+          await generateAndStoreNewKeys(deviceIdentifier);
         }
       } else {
-        // If we don't have mutual messaging yet, make sure to show the warning
-        if (contact === recipient) {
-          setShowTrustWarning(true);
-        }
+        // No stored keys, generate new ones
+        await generateAndStoreNewKeys(deviceIdentifier);
       }
+    } catch (error) {
+      console.error('Error initializing encryption:', error);
+      setEncryptionStatus('error');
+      setSecurityAlert({
+        username: 'System',
+        message: 'Failed to initialize encryption. Messages will not be secure.',
+        type: 'error'
+      });
+      setEncryptionEnabled(false);
+    }
+  };
+  
+  // Generate and store new keys
+  const generateAndStoreNewKeys = async (deviceIdentifier) => {
+    try {
+      console.log('Generating new encryption keys...');
+      const newKeyPair = await generateKeyPair();
+      setKeyPair(newKeyPair);
       
-      // Save the updated trust status
-      saveTrustStatus(updatedStatus);
+      // Store keys in localStorage
+      localStorage.setItem(`whispernetKeys_${deviceIdentifier}`, JSON.stringify(newKeyPair));
       
-      return updatedStatus;
-    });
+      console.log('Generated and stored new encryption keys');
+      setEncryptionStatus('ready');
+    } catch (error) {
+      console.error('Error generating new keys:', error);
+      throw error;
+    }
   };
 
-  // Initialize device fingerprint
+  // Check relay status on initial load
   useEffect(() => {
-    const initializeFingerprint = async () => {
-      try {
-        const fp = await FingerprintJS.load();
-        const result = await fp.get();
-        const deviceId = result.visitorId;
-        setDeviceId(deviceId);
-        console.log('Device fingerprint:', deviceId);
-      } catch (error) {
-        console.error('Error initializing fingerprint:', error);
-        setStatus('Error initializing device fingerprint');
-      }
-    };
-    
-    initializeFingerprint();
-    loadKnownIdentities();
-    loadChatHistory();
-    loadTrustStatus();
-    checkRelayStatus();
-    
-    // Scroll to bottom when messages change
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (deviceId) {
+      checkRelayStatus();
     }
-    
-    // Add window unload handler to ensure username is released when browser is closed
-    const handleBeforeUnload = () => {
-      if (socketRef.current && socketRef.current.connected && username) {
-        // Synchronous logout call to ensure it happens before page unload
-        socketRef.current.emit('userLogout', { username, deviceId });
-      }
-    };
-    
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    
-    return () => {
-      // Clean up event listener
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      
-      // Logout and disconnect
-      if (socketRef.current && socketRef.current.connected && username) {
-        socketRef.current.emit('userLogout', { username, deviceId });
-        socketRef.current.disconnect();
-      }
-      
-      clearInterval(pingIntervalRef.current);
-      clearTimeout(recipientCheckTimeoutRef.current);
-      clearTimeout(typingTimeoutRef.current);
-    };
-  }, [username, deviceId]);
-  
-  // Scroll to bottom when messages change
-  useEffect(() => {
-    if (messagesEndRef.current) {
-      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [messages]);
-  
-  // Update connection info when connection details change
-  useEffect(() => {
-    if (connected && showConnectionInfo) {
-      // Update connection info
-    }
-  }, [connected, showConnectionInfo, username]);
+  }, [deviceId]);
 
+  // Function to check relay status
   const checkRelayStatus = async () => {
+    setStatus('Checking connection status...');
     setRelayStatus('checking');
-    setStatus('Checking base node status...');
     
-    // Try HTTP health check first
     try {
+      // First try HTTP health check
       const response = await axios.get(`${BASE_NODE_URL}/health`, { 
         timeout: 5000 
       });
       
       if (response.status === 200) {
         setRelayStatus('online');
-        setStatus('Base node online. Please login.');
+        setStatus('Connection online. Please login.');
         return;
       }
     } catch (error) {
@@ -409,19 +321,153 @@ function App() {
       forceNew: true
     });
     
+    const connectionTimeout = setTimeout(() => {
+      setRelayStatus('timeout');
+      setStatus('Connection timeout. Server may be offline.');
+      tempSocket.disconnect();
+    }, 8000);
+    
     tempSocket.on('connect', () => {
-      console.log('Connected to base node for status check');
+      clearTimeout(connectionTimeout);
       setRelayStatus('online');
-      setStatus('Base node online. Please login.');
+      setStatus('Connection online. Please login.');
       tempSocket.disconnect();
     });
     
     tempSocket.on('connect_error', (err) => {
-      console.error('Base node connection error:', err);
+      clearTimeout(connectionTimeout);
+      console.error('Socket connection error:', err);
       setRelayStatus('offline');
-      setStatus('Base node offline. Please try again later.');
+      setStatus('Connection offline. Please try again later.');
       tempSocket.disconnect();
     });
+  };
+  
+  // Chat management functions
+  const openChat = async (chatUsername) => {
+    // Check if we already have messages for this chat
+    if (!chatMessages[chatUsername]) {
+      // Load chat history from localStorage
+      const history = loadChatHistory(username, chatUsername);
+      
+      // Update chat messages
+      setChatMessages(prev => ({
+        ...prev,
+        [chatUsername]: history
+      }));
+    }
+    
+    // Mark chat as active
+    setActiveChats(prev => ({
+      ...prev,
+      [chatUsername]: true
+    }));
+    
+    // Set as current chat
+    setCurrentChat(chatUsername);
+    
+    // Reset unread count
+    setUnreadCounts(prev => ({
+      ...prev,
+      [chatUsername]: 0
+    }));
+    resetUnreadCount(username, chatUsername);
+    
+    // Check recipient status
+    checkUserStatus(chatUsername);
+  };
+  
+  const closeChat = (chatUsername) => {
+    // Mark chat as inactive
+    setActiveChats(prev => {
+      const newActiveChats = { ...prev };
+      delete newActiveChats[chatUsername];
+      return newActiveChats;
+    });
+    
+    // If this was the current chat, set current chat to null
+    if (currentChat === chatUsername) {
+      setCurrentChat(null);
+    }
+  };
+  
+  const checkUserStatus = (chatUsername) => {
+    if (!socketRef.current || !chatUsername) return;
+    
+    // First check if the user is in the online users list
+    const isOnline = onlineUsers.includes(chatUsername);
+    
+    if (isOnline) {
+      setRecipientStatuses(prev => ({
+        ...prev,
+        [chatUsername]: { exists: true, online: true }
+      }));
+      return;
+    }
+    
+    // Otherwise, check with the server
+    socketRef.current.emit('checkRecipient', { username: chatUsername }, (response) => {
+      if (response && response.exists) {
+        setRecipientStatuses(prev => ({
+          ...prev,
+          [chatUsername]: { exists: true, online: response.online || false }
+        }));
+      } else {
+        setRecipientStatuses(prev => ({
+          ...prev,
+          [chatUsername]: { exists: false, online: false }
+        }));
+      }
+    });
+  };
+  
+  const handleClearAllHistory = () => {
+    if (window.confirm('Are you sure you want to clear all chat history? This cannot be undone.')) {
+      // Ask if they also want to clear verification keys
+      const clearKeys = window.confirm(
+        'Do you also want to clear all identity verification keys?\n\n' +
+        'If you choose YES, you will need to re-verify all contacts.\n' +
+        'If you choose NO, your contacts will remain verified but chat history will be cleared.'
+      );
+      
+      // Clear all chat history from localStorage
+      clearAllChatHistory(username);
+      
+      // Clear verification keys if requested
+      if (clearKeys) {
+        clearAllVerifiedKeys(username);
+        setVerificationStatuses({});
+      }
+      
+      // Reset state
+      setChatMessages({});
+      setUnreadCounts({});
+      setActiveChats({});
+      setCurrentChat(null);
+      
+      // Show confirmation
+      setSecurityAlert({
+        username: 'System',
+        message: clearKeys ? 
+          'All chat history and verification keys have been cleared.' : 
+          'All chat history has been cleared.',
+        type: 'info'
+      });
+    }
+  };
+  
+  const handleNewChat = (chatUsername) => {
+    if (chatUsername === username) {
+      setSecurityAlert({
+        username: 'System',
+        message: 'You cannot chat with yourself.',
+        type: 'error'
+      });
+      return;
+    }
+    
+    // Open the chat
+    openChat(chatUsername);
   };
 
   // Main socket connection effect
@@ -440,264 +486,201 @@ function App() {
       }
     };
   }, [connected, username, deviceId]);
+  
+  // Effect to save chat messages to localStorage when they change
+  useEffect(() => {
+    if (username && Object.keys(chatMessages).length > 0) {
+      // Save each chat's messages to localStorage
+      Object.keys(chatMessages).forEach(chatUser => {
+        saveChatHistory(username, chatUser, chatMessages[chatUser]);
+      });
+    }
+  }, [username, chatMessages]);
 
-  const handleUsernameSubmit = async (e) => {
-    e.preventDefault();
-    
-    if (!username.trim() || !deviceId) {
-      setStatus('Please enter a valid username');
-      return;
-    }
-    
-    if (relayStatus !== 'online') {
-      setStatus('Cannot connect: Base node is offline');
-      return;
-    }
-    
-    try {
-      setStatus('Checking username availability...');
-      setIsCheckingUsername(true);
-      
-      // Skip username check if we're in development mode and the server is not responding
-      let usernameIsAvailable = true;
-      
-      try {
-        // Check if username is available
-        const response = await axios.get(`${BASE_NODE_URL}/check-username/${username}`, {
-          timeout: 5000
-        });
+  useEffect(() => {
+    if (connected && socketRef.current) {
+      const fetchRelayInfo = () => {
+        console.log('Fetching relay info...');
         
-        usernameIsAvailable = response.data.available;
-      } catch (checkError) {
-        console.warn('Username check failed, proceeding anyway:', checkError);
-        // In case of error, we'll assume the username is available
-        // This allows development without the backend running
-      }
-      
-      setIsCheckingUsername(false);
-      
-      if (usernameIsAvailable) {
-        console.log('Username is available');
-        setUsernameAvailable(true);
-        
-        // Generate encryption keys if needed
-        if (!keyPair) {
-          setStatus('Generating encryption keys...');
-          try {
-            const newKeyPair = await generateKeyPair();
-            setKeyPair(newKeyPair);
-            setEncryptionStatus('ready');
-            console.log('Encryption keys generated successfully');
-          } catch (error) {
-            console.error('Failed to generate encryption keys:', error);
-            setEncryptionStatus('failed');
-            setSecurityAlert({
-              username: 'System',
-              message: 'Failed to generate encryption keys. Messages will not be encrypted.',
-              type: 'error'
+        // First try to get relay info directly from the socket
+        socketRef.current.emit('getRelayInfo', {}, (info) => {
+          if (info && info.relayId) {
+            console.log('Received relay info from socket:', info);
+            // Update relay server information
+            setRelayServerUrl(info.relayId);
+            setConnectionDetails(prev => ({ 
+              ...prev, 
+              relayId: info.relayId,
+              relayStatus: info.status || 'connected',
+              connectedUsers: info.connectedUsers,
+              ip: info.ip,
+              port: info.port
+            }));
+            
+            // Show connection info automatically on first connect
+            if (!showConnectionInfo) {
+              setShowConnectionInfo(true);
+              
+              // Auto-hide after 5 seconds
+              setTimeout(() => {
+                setShowConnectionInfo(false);
+              }, 5000);
+            }
+          } else {
+            console.warn('No relay info received from socket, checking with base node');
+            
+            // If we're connected to the base node, try to get our relay assignment
+            socketRef.current.emit('getMyRelayInfo', { username }, (relayInfo) => {
+              if (relayInfo && relayInfo.success && relayInfo.relayId) {
+                console.log('Received relay assignment from base node:', relayInfo);
+                
+                if (relayInfo.isDirect) {
+                  // We're directly connected to the base node
+                  setRelayServerUrl('Direct to Base Node');
+                  setConnectionDetails(prev => ({ 
+                    ...prev, 
+                    relayId: 'direct',
+                    relayStatus: 'direct_to_base',
+                  }));
+                } else {
+                  // We're assigned to a relay
+                  setRelayServerUrl(relayInfo.relayId);
+                  setConnectionDetails(prev => ({ 
+                    ...prev, 
+                    relayId: relayInfo.relayId,
+                    relayStatus: 'assigned_by_base',
+                  }));
+                }
+              } else {
+                console.warn('No relay assignment from base node, assuming direct connection');
+                
+                // If we can't get relay info, we're probably directly connected to the base node
+                const socketId = socketRef.current.id;
+                setRelayServerUrl(`Direct (${socketId.substring(0, 8)}...)`);
+                setConnectionDetails(prev => ({ 
+                  ...prev, 
+                  relayId: 'direct',
+                  relayStatus: 'direct_to_base',
+                }));
+              }
             });
           }
-        }
-        
-        setConnected(true);
-        setStatus('Connecting to network...');
-      } else {
-        console.log('Username is already taken');
-        setUsernameAvailable(false);
-        setStatus('Username is already taken. Please choose another.');
-      }
-    } catch (error) {
-      console.error('Error in username submission process:', error);
-      setIsCheckingUsername(false);
+        });
+      };
       
-      // Allow login anyway in case of errors
-      setUsernameAvailable(true);
-      setConnected(true);
-      setStatus('Connecting to network (username check bypassed)...');
-    }
-  };
-
-  const handleUsernameChange = (e) => {
-    const newUsername = e.target.value.trim();
-    setUsername(newUsername);
-    
-    // Reset availability check when username changes
-    setUsernameAvailable(true);
-    
-    // Check username availability after a short delay
-    if (newUsername.length > 2) {
-      setIsCheckingUsername(true);
-      clearTimeout(window.usernameCheckTimeout);
+      // Get relay info immediately and then every 10 seconds
+      fetchRelayInfo();
+      const relayInfoInterval = setInterval(fetchRelayInfo, 10000);
       
-      window.usernameCheckTimeout = setTimeout(async () => {
-        try {
-          const response = await axios.get(`${BASE_NODE_URL}/check-username/${newUsername}`, {
-            timeout: 5000
-          });
-          
-          setIsCheckingUsername(false);
-          setUsernameAvailable(response.data.available);
-        } catch (error) {
-          console.warn('Error checking username availability:', error);
-          // In case of error, assume username is available to allow development without backend
-          setIsCheckingUsername(false);
-          setUsernameAvailable(true);
-        }
-      }, 500);
-    } else {
-      setIsCheckingUsername(false);
+      return () => clearInterval(relayInfoInterval);
     }
-  };
-
-  const handleDisconnect = () => {
-    if (socketRef.current) {
-      // Explicitly notify the server that we're logging out
-      socketRef.current.emit('userLogout', { username, deviceId }, (response) => {
-        console.log('Logout response:', response);
-        // Disconnect after logging out
-        socketRef.current.disconnect();
-      });
-      
-      // Set a timeout to force disconnect in case the server doesn't respond
-      setTimeout(() => {
-        if (socketRef.current && socketRef.current.connected) {
-          socketRef.current.disconnect();
-        }
-      }, 1000);
-    }
-    
-    setConnected(false);
-    setUsername('');
-    setMessages([]);
-    setStatus('Disconnected');
-    clearInterval(pingIntervalRef.current);
-    clearTimeout(recipientCheckTimeoutRef.current);
-    clearTimeout(typingTimeoutRef.current);
-  };
+  }, [connected, showConnectionInfo, username]);
 
   const connectToBaseNode = () => {
     // Clear any previous connection
     if (socketRef.current) {
-      // First try to logout to release the username
-      if (socketRef.current.connected) {
-        console.log(`Logging out user ${username} to release username before reconnection`);
-        socketRef.current.emit('userLogout', { username, deviceId }, () => {
-          console.log('Logout acknowledged by server, disconnecting socket');
-          socketRef.current.disconnect();
-          proceedWithBaseNodeConnection();
-        });
-        
-        // Set a timeout in case the server doesn't respond
-        setTimeout(() => {
-          if (socketRef.current && socketRef.current.connected) {
-            console.log('Logout response timeout, forcing disconnect');
-            socketRef.current.disconnect();
-            proceedWithBaseNodeConnection();
-          }
-        }, 1000);
-      } else {
-        socketRef.current.disconnect();
-        proceedWithBaseNodeConnection();
-      }
-    } else {
-      proceedWithBaseNodeConnection();
+      socketRef.current.disconnect();
     }
     
-    function proceedWithBaseNodeConnection() {
-      // Always connect to base node first for handshake and relay discovery
-      console.log('Connecting to base node for initial handshake:', BASE_NODE_URL);
-      setStatus('Connecting to base node for handshake...');
+    // Always connect to base node first for handshake and relay discovery
+    console.log('Connecting to base node for initial handshake:', BASE_NODE_URL);
+    setStatus('Connecting to base node for handshake...');
+    
+    // Connect to base node
+    socketRef.current = io(BASE_NODE_URL, {
+      transports: ['websocket', 'polling'],
+      reconnectionAttempts: 5,
+      reconnectionDelay: 2000,
+      query: { 
+        deviceId,
+        username 
+      },
+      forceNew: true
+    });
+    
+    // Connection event handlers
+    socketRef.current.on('connect', () => {
+      console.log('Connected to base node with socket ID:', socketRef.current.id);
+      setStatus('Connected to base node for handshake');
+      setRelayStatus('online');
       
-      socketRef.current = io(BASE_NODE_URL, {
-        transports: ['websocket', 'polling'],
-        reconnectionAttempts: 3,
-        reconnectionDelay: 1000,
-        query: { 
-          username,
-          deviceId,
-          publicKey: keyPair?.publicKey ? JSON.stringify(keyPair.publicKey) : null,
-          timestamp: Date.now() // Add timestamp to prevent caching issues
-        },
-        auth: {
-          username,
-          deviceId,
-          timestamp: Date.now() // Add timestamp to prevent caching issues
-        },
-        forceNew: true
+      // When connecting to the base node, set the relay information accordingly
+      setRelayServerUrl(`Base Node (Handshake)`);
+      setConnectionDetails({
+        socketId: socketRef.current.id,
+        transport: socketRef.current.io.engine.transport.name,
+        baseNodeUrl: BASE_NODE_URL,
+        relayId: 'base_handshake',
+        relayStatus: 'handshake'
       });
       
-      // Connection event handlers
-      socketRef.current.on('connect', () => {
-        console.log('Connected to base node with socket ID:', socketRef.current.id);
-        setStatus('Connected to base node for handshake');
-        setRelayStatus('online');
+      // Get available relays first
+      socketRef.current.emit('getAvailableRelays', {}, (response) => {
+        console.log('Available relays:', response);
         
-        // When connecting to the base node, set the relay information accordingly
-        setConnectionDetails({
-          socketId: socketRef.current.id,
-          transport: socketRef.current.io.engine.transport.name,
-          baseNodeUrl: BASE_NODE_URL,
-          relayId: 'base_handshake',
-          relayStatus: 'handshake'
-        });
-        
-        setRelayServerUrl('Base Node (Handshake)');
-        
-        // Register with the base node
-        socketRef.current.emit('registerUser', { 
-          username, 
-          deviceId,
-          publicKey: keyPair?.publicKey,
-          timestamp: Date.now() // Add timestamp to ensure fresh registration
-        }, (response) => {
-          console.log('Registration response:', response);
+        if (response && response.relays && response.relays.length > 0) {
+          // Cache relay information
+          localStorage.setItem('whispernetRelayCache', JSON.stringify({
+            timestamp: Date.now(),
+            relays: response.relays
+          }));
           
-          if (response && response.success) {
-            console.log(`User ${username} registered successfully with base node`);
-            setStatus('Registered successfully with base node');
+          // Register with base node temporarily
+          registerWithBaseNode(() => {
+            // After successful registration, connect to a relay
+            connectToRelay(response.relays);
+          });
+        } else {
+          // No relays available, register directly with base node
+          registerWithBaseNode(() => {
+            // Set UI to indicate we're using base node as fallback
+            setRelayServerUrl('Base Node (Fallback)');
+            setConnectionDetails(prev => ({
+              ...prev,
+              relayId: 'direct',
+              relayStatus: 'direct_to_base'
+            }));
+            setStatus('Using Base Node as fallback (no relays available)');
             
-            // Connect socket events
-            connectSocketEvents();
-            
-            // Start ping interval
-            startPingInterval();
-            
-            // Get available relays first
-            socketRef.current.emit('getAvailableRelays', {}, (response) => {
-              console.log('Available relays:', response);
-              
-              if (response && response.relays && response.relays.length > 0) {
-                // Cache relay information
-                localStorage.setItem('whispernetRelayCache', JSON.stringify({
-                  timestamp: Date.now(),
-                  relays: response.relays
-                }));
-                
-                // Connect to the first available relay
-                connectToRelay(response.relays);
-              } else {
-                console.log('No relays available, using base node');
-                setStatus('No relay servers available, using base node');
-                
-                // Update connection details for direct base node connection
-                setRelayServerUrl('Base Node (Fallback)');
-                setConnectionDetails(prev => ({
-                  ...prev,
-                  relayId: 'direct',
-                  relayStatus: 'direct_to_base'
-                }));
-                
-                // Start polling for available relays
-                startRelayPolling();
-              }
-            });
-          } else {
-            console.error('Registration failed:', response?.reason || 'Unknown error');
-            setStatus(`Registration failed: ${response?.reason || 'Unknown error'}`);
-          }
-        });
+            // Start polling for available relays
+            startRelayPolling();
+          });
+        }
       });
-    }
+    });
+    
+    const registerWithBaseNode = (callback) => {
+      // Register with base node
+      socketRef.current.emit('registerUser', { 
+        username, 
+        deviceId 
+      }, (response) => {
+        console.log('Registration response:', response);
+        if (response && response.success) {
+          setStatus('Registered successfully with base node');
+          
+          // Set up socket event handlers
+          connectSocketEvents();
+          
+          // Get initial data
+          getOnlineUsers();
+          startPingInterval();
+          
+          // Execute callback if provided
+          if (callback && typeof callback === 'function') {
+            callback();
+          }
+        } else {
+          const errorMsg = response?.reason || 'Registration failed';
+          setStatus(`Registration failed: ${errorMsg}`);
+          setSecurityAlert({
+            username: 'System',
+            message: `Registration failed: ${errorMsg}`,
+            type: 'error'
+          });
+        }
+      });
+    };
     
     socketRef.current.on('connect_error', (err) => {
       console.error('Base node connection error:', err);
@@ -705,23 +688,25 @@ function App() {
       setRelayStatus('offline');
       
       // Try to use cached relays if available
-      try {
-        const cachedRelayInfo = localStorage.getItem('whispernetRelayCache');
-        if (cachedRelayInfo) {
-          const relayInfo = JSON.parse(cachedRelayInfo);
-          const cacheAge = Date.now() - relayInfo.timestamp;
-          
-          // Use cache if it's less than 1 hour old
-          if (cacheAge < 3600000 && relayInfo.relays && relayInfo.relays.length > 0) {
-            console.log('Using cached relay information');
+      const cachedRelayInfo = localStorage.getItem('whispernetRelayCache');
+      let cachedRelays = [];
+      
+      if (cachedRelayInfo) {
+        try {
+          const parsedCache = JSON.parse(cachedRelayInfo);
+          if (parsedCache.timestamp && (Date.now() - parsedCache.timestamp < 3600000)) { // Cache valid for 1 hour
+            cachedRelays = parsedCache.relays || [];
+            console.log('Using cached relay information:', cachedRelays);
             
-            // Try to connect to the first cached relay
-            connectToRelay(relayInfo.relays[0]);
-            return;
+            if (cachedRelays.length > 0) {
+              setTimeout(() => {
+                connectToRelay(cachedRelays);
+              }, 1000);
+            }
           }
+        } catch (error) {
+          console.error('Error parsing cached relay info:', error);
         }
-      } catch (error) {
-        console.error('Error parsing cached relay info:', error);
       }
     });
     
@@ -731,18 +716,17 @@ function App() {
       
       // Don't auto-reconnect if user manually disconnected
       if (reason !== 'io client disconnect' && connected) {
-        setStatus('Reconnecting...');
-        
-        // Try to reconnect after a delay
         setTimeout(() => {
           if (connected) {
+            // Try to reconnect to base node first
             connectToBaseNode();
           }
         }, 3000);
       }
     });
   };
-
+  
+  // Function to connect to a relay server
   const connectToRelay = (relays) => {
     if (!relays || !relays.length) {
       console.log('No relays available to connect to');
@@ -751,15 +735,10 @@ function App() {
     
     // Use the first available relay
     const relay = relays[0];
-    const relayUrl = relay.url || (relay.id && (relay.id.startsWith('http') ? relay.id : `http://${relay.id}`));
-    
-    if (!relayUrl) {
-      console.error('Invalid relay information');
-      return;
-    }
+    const relayUrl = relay.id.startsWith('http') ? relay.id : `http://${relay.id}`;
     
     console.log(`Switching to relay server: ${relayUrl}`);
-    setStatus(`Connecting to relay server: ${relay.id || relayUrl}...`);
+    setStatus(`Connecting to relay server: ${relay.id}...`);
     
     // Disconnect from base node first
     if (socketRef.current) {
@@ -771,11 +750,6 @@ function App() {
         transports: ['websocket', 'polling'],
         reconnectionAttempts: 3,
         reconnectionDelay: 2000,
-        query: { 
-          username,
-          deviceId,
-          publicKey: keyPair?.publicKey ? JSON.stringify(keyPair.publicKey) : null
-        },
         forceNew: true
       });
       
@@ -804,33 +778,26 @@ function App() {
         // Register with the relay
         socketRef.current.emit('register', { 
           username, 
-          deviceId,
-          publicKey: keyPair?.publicKey
+          deviceId 
         }, (response) => {
           if (response && response.success) {
             console.log('Successfully registered with relay');
             
             // Now we can safely disconnect from the base node
-            oldSocket.emit('userLogout', { username, deviceId }, () => {
-              console.log('Logged out from base node after connecting to relay');
-              oldSocket.disconnect();
-            });
+            oldSocket.disconnect();
             
-            setStatus(`Connected to relay server: ${relay.id || relayUrl}`);
-            setRelayServerUrl(relay.id || relayUrl);
+            setStatus(`Connected to relay server: ${relay.id}`);
+            setRelayServerUrl(relay.id);
             setConnectionDetails(prev => ({
               ...prev,
-              relayId: relay.id || relayUrl,
+              relayId: relay.id,
               socketId: socketRef.current.id,
               transport: socketRef.current.io.engine.transport.name,
-              relayStatus: 'connected_to_relay',
-              ip: relay.ip,
-              port: relay.port,
-              connectedUsers: relay.connectedUsers
+              relayStatus: 'connected_to_relay'
             }));
             
-            // Set up socket event handlers for the relay connection
-            setupRelaySocketEvents();
+            // Set up socket event handlers
+            connectSocketEvents();
             
             // Start ping interval
             startPingInterval();
@@ -869,7 +836,7 @@ function App() {
         // Stay with base node
         socketRef.current = oldSocket;
         
-        setStatus('Using Base Node (relay connection failed)');
+        setStatus('Using Base Node (relay connection error)');
         setRelayServerUrl('Base Node (Fallback)');
         setConnectionDetails(prev => ({
           ...prev,
@@ -889,140 +856,17 @@ function App() {
           setStatus(`Disconnected from relay: ${reason}`);
           
           // Try to reconnect to base node
-          connectToBaseNode();
+          setTimeout(() => {
+            if (connected) {
+              connectToBaseNode();
+            }
+          }, 1000);
         }
       });
     }
   };
   
-  // Set up socket event handlers specifically for relay connections
-  const setupRelaySocketEvents = () => {
-    if (!socketRef.current) return;
-    
-    // Remove any existing listeners to prevent duplicates
-    socketRef.current.off('receiveMessage');
-    socketRef.current.off('userTyping');
-    socketRef.current.off('userStatusUpdate');
-    socketRef.current.off('publicKeyRequest');
-    
-    // Handle incoming messages
-    socketRef.current.on('receiveMessage', async (data) => {
-      console.log(`Received message from ${data.from}`);
-      
-      // Process the message
-      let messageContent = data.message;
-      let isEncrypted = data.encrypted;
-      
-      // Decrypt message if it's encrypted and we have the keys
-      if (isEncrypted && keyPair && keyPair.privateKey) {
-        try {
-          messageContent = await decryptMessage(data.message, keyPair.privateKey);
-          console.log('Message decrypted successfully');
-        } catch (error) {
-          console.error('Failed to decrypt message:', error);
-          messageContent = '[Encrypted message - decryption failed]';
-        }
-      }
-      
-      // Create message object
-      const newMessage = {
-        id: Date.now().toString(),
-        from: data.from,
-        content: messageContent,
-        timestamp: data.timestamp || new Date().toISOString(),
-        encrypted: isEncrypted,
-        fromDeviceId: data.fromDeviceId,
-        bounced: data.bounced || false
-      };
-      
-      // Add message to state
-      setMessages(prevMessages => [...prevMessages, newMessage]);
-      
-      // Update chat history
-      updateChatHistory(data.from, newMessage);
-      
-      // Update trust status - we've received a message from this user
-      updateTrustStatus(data.from, { receivedMessage: true });
-      
-      // Store the sender's public key if provided
-      if (data.publicKey && !publicKeys[data.from]) {
-        setPublicKeys(prev => ({
-          ...prev,
-          [data.from]: data.publicKey
-        }));
-        console.log(`Stored public key for ${data.from}`);
-      }
-      
-      // Check identity
-      if (data.fromDeviceId) {
-        checkIdentity(data.from, data.fromDeviceId);
-      }
-    });
-    
-    // Handle typing indicators
-    socketRef.current.on('userTyping', (data) => {
-      if (data.username === recipient) {
-        setTyping(true);
-        
-        // Clear previous timeout
-        if (typingTimeoutRef.current) {
-          clearTimeout(typingTimeoutRef.current);
-        }
-        
-        // Set timeout to clear typing indicator
-        typingTimeoutRef.current = setTimeout(() => {
-          setTyping(false);
-        }, 3000);
-      }
-    });
-    
-    // Handle user status updates
-    socketRef.current.on('userStatusUpdate', (data) => {
-      console.log(`User status update: ${data.username} is ${data.online ? 'online' : 'offline'}`);
-      
-      // Update online users list
-      setOnlineUsers(prev => {
-        if (data.online && !prev.includes(data.username)) {
-          return [...prev, data.username];
-        } else if (!data.online) {
-          return prev.filter(user => user !== data.username);
-        }
-        return prev;
-      });
-      
-      // Update recipient status if this is the current recipient
-      if (data.username === recipient) {
-        setRecipientStatus(prev => ({
-          ...prev,
-          online: data.online
-        }));
-      }
-    });
-    
-    // Handle public key requests
-    socketRef.current.on('publicKeyRequest', (data, ack) => {
-      console.log(`Public key requested by ${data.from}`);
-      
-      if (keyPair && keyPair.publicKey) {
-        console.log('Sending public key');
-        if (ack) ack({ publicKey: keyPair.publicKey });
-      } else {
-        console.log('No public key available');
-        if (ack) ack({ success: false, reason: 'No public key available' });
-      }
-    });
-    
-    // Handle relay-specific events
-    socketRef.current.on('relayInfo', (data) => {
-      console.log('Received relay info:', data);
-      setConnectionDetails(prev => ({
-        ...prev,
-        ...data,
-        relayStatus: 'connected_to_relay'
-      }));
-    });
-  };
-
+  // Function to periodically poll for available relays when using base node as fallback
   const startRelayPolling = () => {
     // Clear any existing polling interval
     if (window.relayPollingInterval) {
@@ -1032,7 +876,7 @@ function App() {
     // Set up polling interval
     window.relayPollingInterval = setInterval(() => {
       if (socketRef.current && socketRef.current.connected && 
-          (connectionDetails.relayStatus === 'direct_to_base' || connectionDetails.relayId === 'direct')) {
+          connectionDetails.relayStatus === 'direct_to_base') {
         console.log('Polling for available relays...');
         
         socketRef.current.emit('getAvailableRelays', {}, (response) => {
@@ -1045,7 +889,7 @@ function App() {
               relays: response.relays
             }));
             
-            // Connect to the first available relay
+            // Connect to a relay
             connectToRelay(response.relays);
             
             // Clear polling interval
@@ -1075,6 +919,70 @@ function App() {
       if (publicKey && from) {
         console.log(`Storing public key for ${from}`);
         setPublicKeys(prev => ({ ...prev, [from]: publicKey }));
+        
+        // Check if this is the first message from this user
+        const previousMessages = chatMessages[from] || [];
+        const isFirstMessage = previousMessages.length === 0;
+        
+        // Verify the key if we have a stored key for this user
+        if (hasVerifiedKey(username, from)) {
+          // We have a verified key, check if it matches
+          const verificationResult = await verifyKey(username, from, publicKey, fromDeviceId);
+          
+          // Generate fingerprint and then update verification status
+          generateKeyFingerprint(publicKey).then(fingerprint => {
+            setVerificationStatuses(prev => ({
+              ...prev,
+              [from]: {
+                verified: verificationResult.verified,
+                status: verificationResult.status,
+                message: verificationResult.message,
+                verifiedAt: verificationResult.verifiedAt,
+                fingerprint: fingerprint
+              }
+            }));
+          });
+          
+          // Show warning if key doesn't match
+          if (!verificationResult.verified) {
+            setSecurityAlert({
+              username: from,
+              message: `Warning: ${from}'s identity could not be verified. ${verificationResult.message}`,
+              type: 'warning'
+            });
+          }
+        } else if (isFirstMessage) {
+          // This is the first message and we don't have a verified key
+          // Set as unverified and prompt for verification
+          generateKeyFingerprint(publicKey).then(fingerprint => {
+            setVerificationStatuses(prev => ({
+              ...prev,
+              [from]: {
+                verified: false,
+                status: 'unverified',
+                message: 'Identity not verified',
+                fingerprint
+              }
+            }));
+            
+            // Show verification prompt
+            setSecurityAlert({
+              username: 'System',
+              message: `New message from ${from}. Click on "UNVERIFIED" to verify their identity.`,
+              type: 'info'
+            });
+          });
+        }
+      }
+      
+      // If this is a bounced message, show a notification
+      if (bounced) {
+        console.log(`Received bounced message from ${from}`);
+        setSecurityAlert({
+          username: 'System',
+          message: `Received delayed message from ${from} that was sent while you were offline.`,
+          type: 'info'
+        });
       }
       
       // Security check for device ID changes
@@ -1111,7 +1019,7 @@ function App() {
         }
       }
       
-      // Create message object
+      // Create the message object
       const messageObj = { 
         from, 
         message: decryptedMessage, 
@@ -1119,17 +1027,56 @@ function App() {
         timestamp: new Date(timestamp || new Date()),
         encrypted,
         decryptionStatus,
-        bounced
+        bounced: bounced || false
       };
       
-      // Add to messages array for current view
+      // Add to global messages for backward compatibility
       setMessages(msgs => [...msgs, messageObj]);
       
-      // Update chat history for this contact
-      updateChatHistory(from, messageObj);
+      // Add message to the appropriate chat
+      setChatMessages(prev => {
+        const updatedMessages = { 
+          ...prev,
+          [from]: [...(prev[from] || []), messageObj]
+        };
+        
+        // Save to localStorage
+        saveChatHistory(username, from, updatedMessages[from]);
+        
+        return updatedMessages;
+      });
       
-      // Update trust status - mark that we received a message from this user
-      updateTrustStatus(from, { receivedMessage: true });
+      // If this chat is not the current chat, increment unread count
+      if (currentChat !== from) {
+        setUnreadCounts(prev => {
+          const newCounts = {
+            ...prev,
+            [from]: (prev[from] || 0) + 1
+          };
+          
+          // Save to localStorage
+          saveUnreadCounts(username, newCounts);
+          
+          return newCounts;
+        });
+        
+        // Also increment in localStorage
+        incrementUnreadCount(username, from);
+      }
+      
+      // Make sure this user is in our active chats
+      setActiveChats(prev => {
+        if (!prev[from]) {
+          return {
+            ...prev,
+            [from]: true
+          };
+        }
+        return prev;
+      });
+      
+      // Check user status
+      checkUserStatus(from);
     });
     
     // Handle public key requests
@@ -1173,7 +1120,19 @@ function App() {
         return prev;
       });
       
-      // If we have a recipient, check if they're in the online users list
+      // Update recipient status for all active chats
+      if (activeChats[user]) {
+        setRecipientStatuses(prev => ({
+          ...prev,
+          [user]: { 
+            ...prev[user],
+            exists: true, 
+            online 
+          }
+        }));
+      }
+      
+      // If we're currently checking a recipient, refresh their status
       if (recipient) {
         checkRecipientStatus();
       }
@@ -1186,28 +1145,63 @@ function App() {
         setOnlineUsers(data.users);
         
         // If we have a recipient, check if they're in the online users list
-        if (recipient) {
-          const isOnline = data.users.includes(recipient);
-          console.log(`Recipient ${recipient} is ${isOnline ? 'online' : 'offline'}`);
-          
+        if (recipient && data.users.includes(recipient)) {
           setRecipientStatus(prev => ({ 
             ...prev, 
-            exists: prev.exists, // Keep existing value
-            online: isOnline,
-            notRegisteredYet: false // Clear this flag since we got an update
+            exists: true,
+            online: true,
+            notRegisteredYet: false
           }));
+        } else if (recipient) {
+          // If recipient is not in the online users list, refresh their status
+          checkRecipientStatus();
         }
+        
+        // Update status for all active chats
+        Object.keys(activeChats).forEach(chatUser => {
+          const isOnline = data.users.includes(chatUser);
+          setRecipientStatuses(prev => ({
+            ...prev,
+            [chatUser]: { 
+              ...prev[chatUser],
+              exists: prev[chatUser]?.exists || isOnline, 
+              online: isOnline 
+            }
+          }));
+        });
       }
     });
     
     // Typing indicators
     socketRef.current.on('userTyping', (data) => {
       const { username: typingUser } = data;
+      
+      // Update typing status for this user
+      setTypingUsers(prev => ({
+        ...prev,
+        [typingUser]: true
+      }));
+      
+      // For backward compatibility
       if (typingUser === recipient) {
         setTyping(true);
-        clearTimeout(typingTimeoutRef.current);
-        typingTimeoutRef.current = setTimeout(() => setTyping(false), 3000);
       }
+      
+      // Clear any existing timeout
+      clearTimeout(typingTimeoutRef.current);
+      
+      // Set a timeout to clear the typing indicator after 3 seconds
+      typingTimeoutRef.current = setTimeout(() => {
+        setTypingUsers(prev => ({
+          ...prev,
+          [typingUser]: false
+        }));
+        
+        // For backward compatibility
+        if (typingUser === recipient) {
+          setTyping(false);
+        }
+      }, 3000);
     });
     
     // Error handling
@@ -1219,13 +1213,14 @@ function App() {
         type: 'error'
       });
     });
-    
-    // Request online users list
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit('getOnlineUsers', {}, (response) => {
-        if (response && Array.isArray(response.users)) {
-          console.log('Online users:', response.users);
-          setOnlineUsers(response.users);
+  };
+
+  const getOnlineUsers = () => {
+    if (socketRef.current) {
+      socketRef.current.emit('getOnlineUsers', {}, (users) => {
+        console.log('Online users:', users);
+        if (Array.isArray(users)) {
+          setOnlineUsers(users);
         }
       });
     }
@@ -1241,52 +1236,330 @@ function App() {
           }
         });
         
-        // Request online users list
-        socketRef.current.emit('getOnlineUsers', {}, (response) => {
-          if (response && Array.isArray(response.users)) {
-            console.log('Online users:', response.users);
-            setOnlineUsers(response.users);
-          }
-        });
+        // Also refresh online users list
+        getOnlineUsers();
+        
+        // If we have a recipient, check their status
+        if (recipient) {
+          checkRecipientStatus();
+        }
       }
-    }, 30000); // Ping every 30 seconds
+    }, 30000); // Every 30 seconds
   };
 
+  // Check recipient status
   const checkRecipientStatus = () => {
-    if (!recipient || !socketRef.current || !socketRef.current.connected) {
+    if (!recipient || !socketRef.current) {
+      setRecipientStatus({ exists: false, online: false, checking: false });
       return;
     }
     
     console.log(`Checking status for recipient: ${recipient}`);
     
-    // Check if the recipient is in the online users list
-    const isOnline = onlineUsers.includes(recipient);
+    // Set status to checking while we wait for the response
+    setRecipientStatus(prev => ({ ...prev, checking: true }));
     
-    // Check if the user exists
-    socketRef.current.emit('checkUser', { username: recipient }, (response) => {
-      console.log('Check user response:', response);
-      
-      if (response && response.exists) {
-        setRecipientStatus({ 
-          exists: true, 
-          online: isOnline,
-          notRegisteredYet: false
-        });
+    // Set a timeout to clear the checking status if we don't get a response
+    const checkingTimeout = setTimeout(() => {
+      setRecipientStatus(prev => {
+        if (prev.checking) {
+          return { ...prev, checking: false };
+        }
+        return prev;
+      });
+    }, 3000); // 3 seconds timeout
+    
+    // First check if the recipient is in the online users list
+    if (onlineUsers.includes(recipient)) {
+      clearTimeout(checkingTimeout);
+      console.log(`${recipient} found in online users list`);
+      setRecipientStatus({ exists: true, online: true, checking: false });
+      return;
+    }
+    
+    // If we're connected to a relay, use the checkRecipient event
+    if (connectionDetails.relayStatus === 'connected_to_relay') {
+      socketRef.current.emit('checkRecipient', { username: recipient }, (relayResponse) => {
+        clearTimeout(checkingTimeout);
+        console.log('Relay recipient check response:', relayResponse);
+        if (relayResponse && typeof relayResponse.exists === 'boolean') {
+          // Only update if we got a valid response
+          setRecipientStatus({
+            ...relayResponse,
+            checking: false
+          });
+        } else {
+          // If no valid response, mark as not found
+          setRecipientStatus({ 
+            exists: false, 
+            online: false, 
+            checking: false 
+          });
+        }
+      });
+    } else {
+      // If connected directly to base node, use checkUser
+      socketRef.current.emit('checkUser', { username: recipient }, (response) => {
+        clearTimeout(checkingTimeout);
+        console.log('Base node recipient check response:', response);
+        
+        // If we got a valid response, use it
+        if (response && typeof response.exists === 'boolean') {
+          setRecipientStatus({
+            ...response,
+            checking: false
+          });
+        } else {
+          // If no valid response, mark as not found
+          setRecipientStatus({ 
+            exists: false, 
+            online: false, 
+            checking: false 
+          });
+        }
+      });
+    }
+  };
+
+  // Effect to check recipient status whenever recipient changes
+  useEffect(() => {
+    const timeoutId = setTimeout(() => {
+      if (connected && recipient) {
+        checkRecipientStatus();
+      }
+    }, 500); // Debounce
+    
+    return () => clearTimeout(timeoutId);
+  }, [connected, recipient]);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  // Key verification functions
+  const initializeVerificationStatuses = () => {
+    // Load verification statuses for all active chats
+    const activeChats = getActiveChats(username);
+    const initialVerificationStatuses = {};
+    
+    activeChats.forEach(chatUser => {
+      const verifiedKey = getVerifiedKey(username, chatUser);
+      if (verifiedKey) {
+        initialVerificationStatuses[chatUser] = {
+          verified: true,
+          status: 'verified',
+          message: 'Identity verified',
+          verifiedAt: verifiedKey.verifiedAt,
+          fingerprint: verifiedKey.fingerprint
+        };
       } else {
-        setRecipientStatus({ 
-          exists: false, 
-          online: false,
-          notRegisteredYet: true
-        });
+        initialVerificationStatuses[chatUser] = {
+          verified: false,
+          status: 'unverified',
+          message: 'Identity not verified'
+        };
       }
     });
+    
+    setVerificationStatuses(initialVerificationStatuses);
+  };
+  
+  const handleVerifyIdentity = (contactUsername) => {
+    // Get the public key for this contact
+    const contactPublicKey = publicKeys[contactUsername];
+    
+    if (!contactPublicKey) {
+      setSecurityAlert({
+        username: 'System',
+        message: `Cannot verify ${contactUsername}'s identity: No public key available.`,
+        type: 'error'
+      });
+      return;
+    }
+    
+    // Generate fingerprint for the key
+    generateKeyFingerprint(contactPublicKey).then(fingerprint => {
+      // Check if we already have a verified key for this contact
+      const verifiedKey = getVerifiedKey(username, contactUsername);
+      
+      let verificationInfo = {
+        contactUsername,
+        fingerprint,
+        status: 'new_contact',
+        message: 'New contact verification'
+      };
+      
+      if (verifiedKey) {
+        // We have a verified key, check if it matches
+        if (verifiedKey.fingerprint !== fingerprint) {
+          // Key mismatch
+          verificationInfo = {
+            contactUsername,
+            fingerprint,
+            previousFingerprint: verifiedKey.fingerprint,
+            status: 'key_mismatch',
+            message: 'Public key has changed since last verification',
+            verifiedAt: verifiedKey.verifiedAt
+          };
+        } else {
+          // Key matches
+          verificationInfo = {
+            contactUsername,
+            fingerprint,
+            status: 'verified',
+            message: 'Identity verified',
+            verifiedAt: verifiedKey.verifiedAt
+          };
+        }
+      }
+      
+      // Show verification modal
+      setCurrentVerification(verificationInfo);
+      setShowVerificationModal(true);
+    }).catch(error => {
+      console.error('Error generating key fingerprint:', error);
+      setSecurityAlert({
+        username: 'System',
+        message: `Error verifying identity: ${error.message}`,
+        type: 'error'
+      });
+    });
+  };
+  
+  const handleConfirmVerification = () => {
+    if (!currentVerification || !currentVerification.contactUsername) return;
+    
+    const { contactUsername } = currentVerification;
+    const contactPublicKey = publicKeys[contactUsername];
+    
+    if (!contactPublicKey) {
+      setSecurityAlert({
+        username: 'System',
+        message: `Cannot verify ${contactUsername}'s identity: No public key available.`,
+        type: 'error'
+      });
+      setShowVerificationModal(false);
+      return;
+    }
+    
+    // Store the verified key
+    storeVerifiedKey(username, contactUsername, contactPublicKey, deviceId);
+    
+    // Update verification status
+    setVerificationStatuses(prev => ({
+      ...prev,
+      [contactUsername]: {
+        verified: true,
+        status: 'verified',
+        message: 'Identity verified',
+        verifiedAt: Date.now(),
+        fingerprint: currentVerification.fingerprint
+      }
+    }));
+    
+    // Show confirmation
+    setSecurityAlert({
+      username: 'System',
+      message: `${contactUsername}'s identity has been verified.`,
+      type: 'success'
+    });
+    
+    // Close modal
+    setShowVerificationModal(false);
+  };
+  
+  const handleCancelVerification = () => {
+    setShowVerificationModal(false);
+  };
+
+  // Initialize chat data from localStorage
+  const initializeChatData = () => {
+    // Load active chats
+    const activeChats = getActiveChats(username);
+    
+    // Initialize chat data
+    const initialChatMessages = {};
+    const initialUnreadCounts = loadUnreadCounts(username);
+    const initialRecipientStatuses = {};
+    
+    // Load chat history for each active chat
+    activeChats.forEach(chatUser => {
+      initialChatMessages[chatUser] = loadChatHistory(username, chatUser);
+      initialRecipientStatuses[chatUser] = { exists: true, online: onlineUsers.includes(chatUser) };
+    });
+    
+    // Update state
+    setChatMessages(initialChatMessages);
+    setUnreadCounts(initialUnreadCounts);
+    setRecipientStatuses(initialRecipientStatuses);
+    
+    // Set active chats
+    const activeChatsObj = {};
+    activeChats.forEach(chatUser => {
+      activeChatsObj[chatUser] = true;
+    });
+    setActiveChats(activeChatsObj);
+    
+    // Initialize verification statuses
+    initializeVerificationStatuses();
+  };
+
+  const handleUsernameSubmit = async (e) => {
+    e.preventDefault();
+    if (username.trim() && relayStatus === 'online') {
+      setIsCheckingUsername(true);
+      const tempSocket = io(BASE_NODE_URL, { forceNew: true, timeout: 5000 });
+      tempSocket.on('connect', () => {
+        tempSocket.emit('checkUser', { username: username.trim() }, (response) => {
+          setIsCheckingUsername(false);
+          if (response && response.exists) {
+            setUsernameAvailable(false);
+            setSecurityAlert({
+              username: 'System',
+              message: `Username "${username}" is already taken.`,
+              type: 'error'
+            });
+            // Explicitly disconnect and do NOT set connected to true
+            tempSocket.disconnect();
+          } else {
+            setUsernameAvailable(true);
+            setConnected(true);
+            
+            // Initialize chat data from localStorage
+            initializeChatData();
+            
+            tempSocket.disconnect();
+          }
+        });
+      });
+      tempSocket.on('connect_error', (error) => {
+        console.error('Connection error during username check:', error);
+        setIsCheckingUsername(false);
+        setSecurityAlert({
+          username: 'System',
+          message: 'Could not verify username. Base node may be offline.',
+          type: 'error'
+        });
+        tempSocket.disconnect();
+      });
+    } else if (relayStatus !== 'online') {
+      setSecurityAlert({
+        username: 'System',
+        message: 'Cannot connect: Server is offline',
+        type: 'error'
+      });
+    }
   };
 
   const handleRecipientChange = (e) => {
     const newRecipient = e.target.value.trim();
     setRecipient(newRecipient);
     
-    if (newRecipient) {
+    // Reset recipient status when the recipient changes
+    setRecipientStatus({ exists: false, online: false, checking: false });
+    
+    // If the recipient is not empty, check their status
+    if (newRecipient && socketRef.current) {
       // Use a small delay to avoid too many checks while typing
       if (recipientCheckTimeoutRef.current) {
         clearTimeout(recipientCheckTimeoutRef.current);
@@ -1331,6 +1604,38 @@ function App() {
           console.error('Failed to get public key:', error);
           // Continue without encryption if we can't get the key
         }
+      }
+      
+      // Check if this is the first message to this recipient
+      const previousMessages = chatMessages[recipient] || [];
+      const isFirstMessage = previousMessages.length === 0;
+      
+      // If this is the first message and we have the recipient's public key but haven't verified it
+      if (isFirstMessage && publicKeys[recipient] && !hasVerifiedKey(username, recipient)) {
+        // Show verification warning
+        const shouldProceed = window.confirm(
+          `⚠️ You haven't previously verified the identity of ${recipient}.\n\n` +
+          `Proceed only if you trust them. You can verify their identity after sending the message.`
+        );
+        
+        if (!shouldProceed) {
+          setStatus('Registered successfully');
+          return;
+        }
+        
+        // Generate fingerprint for the key
+        const fingerprint = await generateKeyFingerprint(publicKeys[recipient]);
+        
+        // Set as unverified
+        setVerificationStatuses(prev => ({
+          ...prev,
+          [recipient]: {
+            verified: false,
+            status: 'unverified',
+            message: 'Identity not verified',
+            fingerprint
+          }
+        }));
       }
       
       let finalMessage = message.trim();
@@ -1378,9 +1683,7 @@ function App() {
         setStatus('Registered successfully');
       }, 10000);
       
-      // Use the correct event name based on whether we're connected to a relay or base node
-      const eventName = connectionDetails.relayStatus === 'connected_to_relay' ? 'sendMessage' : 'routeMessage';
-      socketRef.current.emit(eventName, messageData, (response) => {
+      socketRef.current.emit('sendMessage', messageData, (response) => {
         clearTimeout(messageTimeout);
         console.log('Send message response:', response);
         setStatus('Registered successfully');
@@ -1397,15 +1700,34 @@ function App() {
             encrypted: isEncrypted
           };
           
-          // Add message to local state (store original message for display)
+          // Add to global messages for backward compatibility
           setMessages(msgs => [...msgs, messageObj]);
           
-          // Update chat history for this contact
-          updateChatHistory(recipient, messageObj);
+          // Add message to the appropriate chat
+          setChatMessages(prev => {
+            const updatedMessages = { 
+              ...prev,
+              [recipient]: [...(prev[recipient] || []), messageObj]
+            };
+            
+            // Save to localStorage
+            saveChatHistory(username, recipient, updatedMessages[recipient]);
+            
+            return updatedMessages;
+          });
           
-          // Update trust status - mark that we sent a message to this user
-          updateTrustStatus(recipient, { sentMessage: true });
+          // Make sure this user is in our active chats
+          setActiveChats(prev => {
+            if (!prev[recipient]) {
+              return {
+                ...prev,
+                [recipient]: true
+              };
+            }
+            return prev;
+          });
           
+          // Clear message input
           setMessage('');
           
           // Show notification if message was bounced
@@ -1439,15 +1761,34 @@ function App() {
                 encrypted: isEncrypted
               };
               
-              // Add message to local state as bounced
+              // Add to global messages for backward compatibility
               setMessages(msgs => [...msgs, messageObj]);
               
-              // Update chat history for this contact
-              updateChatHistory(recipient, messageObj);
+              // Add message to the appropriate chat
+              setChatMessages(prev => {
+                const updatedMessages = { 
+                  ...prev,
+                  [recipient]: [...(prev[recipient] || []), messageObj]
+                };
+                
+                // Save to localStorage
+                saveChatHistory(username, recipient, updatedMessages[recipient]);
+                
+                return updatedMessages;
+              });
               
-              // Update trust status - mark that we sent a message to this user
-              updateTrustStatus(recipient, { sentMessage: true });
+              // Make sure this user is in our active chats
+              setActiveChats(prev => {
+                if (!prev[recipient]) {
+                  return {
+                    ...prev,
+                    [recipient]: true
+                  };
+                }
+                return prev;
+              });
               
+              // Clear message input
               setMessage('');
             } else {
               setSecurityAlert({
@@ -1514,21 +1855,30 @@ function App() {
     });
   };
   
-  const handleBounce = (e) => {
-    if (!recipient || !message.trim()) {
+  // Handle relay bounce for any user
+  const handleRelayBounce = (e) => {
+    e.preventDefault();
+    
+    if (!recipient || !message.trim() || !socketRef.current) {
+      console.log('Cannot send relay message: missing recipient, message, or socket');
       return;
     }
     
     // Show confirmation before bouncing
     const confirmBounce = window.confirm(
       `RELAY MESSAGE\n\n` +
-      `Your message to "${recipient}" will be stored on ${connectionDetails.relayStatus === 'connected_to_relay' ? 'relay' : 'base node'} servers for up to 4 hours.\n\n` +
-      `It will be delivered when ${recipient} comes online or registers with the network.\n\n` +
-      `Continue?`
+      `Your message to "${recipient}" will be securely encrypted and will continuously bounce across the relay network\n` +
+      `until ${recipient} comes online or registers with the network.\n\n` +
+      `It will not be stored at any single point for long, ensuring privacy and delivery reliability.\n\n` +
+      `Do you want to continue?`
     );
     
     if (confirmBounce) {
-      handleSend(e, true);
+      // Create a synthetic event object with preventDefault method
+      const syntheticEvent = { preventDefault: () => {} };
+      
+      // Call handleSend with our synthetic event and bounce=true
+      handleSend(syntheticEvent, true);
     }
   };
 
@@ -1539,6 +1889,62 @@ function App() {
     if (socketRef.current && recipient && e.target.value.length > 0) {
       socketRef.current.emit('typing', { to: recipient });
     }
+  };
+
+  const handleDisconnect = () => {
+    // Store the current socket reference
+    const currentSocket = socketRef.current;
+    
+    // Reset all state immediately to ensure the UI updates right away
+    setConnected(false);
+    setUsername('');
+    setOnlineUsers([]); 
+    setActiveChats({});
+    setChatMessages({});
+    setCurrentChat(null);
+    setStatus('Disconnected');
+    setPublicKeys({});
+    setEncryptionStatus('disconnected');
+    setRecipientStatuses({}); 
+    setMessages([]);
+    setRecipientStatus({ exists: false, online: false });
+    
+    // Clear intervals
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
+    
+    // Notify the server and disconnect only if socket exists
+    if (currentSocket) {
+      try {
+        // Notify the server that we're intentionally disconnecting
+        currentSocket.emit('userLogout', { username, deviceId });
+        
+        // Give a small delay to ensure the logout message is sent before disconnecting
+        setTimeout(() => {
+          try {
+            if (currentSocket.connected) {
+              currentSocket.disconnect();
+            }
+          } catch (error) {
+            console.error('Error disconnecting socket:', error);
+          }
+          // Clear the socket reference
+          socketRef.current = null;
+        }, 100);
+      } catch (error) {
+        console.error('Error during disconnect:', error);
+        // Ensure socket reference is cleared even if there's an error
+        socketRef.current = null;
+      }
+    } else {
+      console.log('No active socket connection to disconnect');
+      socketRef.current = null;
+    }
+    
+    // Set relay status to offline
+    setRelayStatus('offline');
   };
 
   const dismissAlert = () => {
@@ -1560,194 +1966,986 @@ function App() {
     const date = new Date(timestamp);
     return `[${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}:${date.getSeconds().toString().padStart(2, '0')}]`;
   };
-  
-  // Function to switch to a specific chat
-  const switchToChat = (contactUsername) => {
-    setActiveChat(contactUsername);
-    setRecipient(contactUsername || '');
-    
-    // Load messages for this contact
-    if (contactUsername && chatHistory[contactUsername]) {
-      setMessages(chatHistory[contactUsername]);
-    } else {
-      setMessages([]);
-    }
-    
-    // Check if we need to show trust warning
-    if (contactUsername && trustStatus[contactUsername]) {
-      setShowTrustWarning(!trustStatus[contactUsername].mutualMessaging);
-    } else if (contactUsername) {
-      setShowTrustWarning(true);
-    } else {
-      setShowTrustWarning(false);
-    }
-  };
-  
-  // Function to toggle About page
-  const toggleAboutPage = () => {
-    setShowAboutPage(!showAboutPage);
-  };
 
   return (
     <div style={{ 
       background: '#0a0e14', 
-      minHeight: '100vh', 
+      minHeight: '100vh',
+      width: '100vw',
+      height: '100vh',
       color: '#a2aabc', 
-      display: 'flex',
+      display: 'flex', 
       flexDirection: 'column',
-      fontFamily: '"Fira Code", monospace'
+      fontFamily: '"Fira Code", monospace',
+      overflow: 'hidden'
     }}>
-      {/* Header */}
-      <header style={{
-        background: '#171c28',
-        padding: '16px 24px',
-        borderBottom: '1px solid rgba(0, 255, 170, 0.3)',
+      <div style={{ 
+        background: '#171c28', 
+        flex: 1,
         display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center'
+        flexDirection: 'column',
+        overflow: 'hidden'
       }}>
-        <div style={{ display: 'flex', alignItems: 'center' }}>
-          <h1 style={{ 
+        <div style={{ 
+          display: 'flex', 
+          justifyContent: 'space-between', 
+          alignItems: 'center',
+          padding: '16px 24px',
+          borderBottom: '1px solid #1e2d3d'
+        }}>
+          <h2 style={{ 
             margin: 0, 
             color: '#5ccfe6', 
             fontFamily: '"Fira Code", monospace',
-            letterSpacing: '1px',
-            fontSize: '24px'
-          }}>WhisperNet_</h1>
-          
-          {username && (
-            <span style={{ 
-              marginLeft: '16px', 
-              color: '#bae67e', 
-              fontSize: '14px',
-              padding: '4px 8px',
-              background: 'rgba(186, 230, 126, 0.1)',
-              borderRadius: '4px'
-            }}>
-              @{username}
-            </span>
-          )}
+            letterSpacing: '1px'
+          }}>WhisperNet_</h2>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <div style={{ 
+              fontSize: 12, 
+              padding: '4px 8px', 
+              borderRadius: 4, 
+              background: relayStatus === 'online' ? '#1c4b3c' : '#4b1c1c',
+              color: relayStatus === 'online' ? '#5ccfe6' : '#ff8f40',
+              cursor: 'pointer'
+            }} onClick={() => setShowConnectionInfo(!showConnectionInfo)}>
+              {relayStatus === 'online' ? 'Online' : 
+               relayStatus === 'checking' ? 'Checking...' : 'Offline'}
+            </div>
+            <div style={{ 
+              fontSize: 12, 
+              padding: '4px 8px', 
+              borderRadius: 4, 
+              background: '#1c3b4b',
+              color: '#5ccfe6',
+              cursor: 'pointer'
+            }} onClick={() => setShowAboutPage(true)}>
+              About
+            </div>
+          </div>
         </div>
         
-        <div style={{ display: 'flex', alignItems: 'center' }}>
+        {showConnectionInfo && (
           <div style={{ 
+            background: '#0d1117', 
+            padding: '8px 24px', 
             fontSize: 12, 
-            padding: '4px 8px', 
-            borderRadius: 4, 
-            background: relayStatus === 'online' ? '#1c4b3c' : '#4b1c1c',
-            color: relayStatus === 'online' ? '#5ccfe6' : '#ff8f40',
-            cursor: 'pointer',
-            marginRight: '12px'
-          }} onClick={() => setShowConnectionInfo(!showConnectionInfo)}>
-            {relayStatus === 'online' ? 'Base Node Online' : 
-             relayStatus === 'checking' ? 'Checking...' : 'Base Node Offline'}
+            fontFamily: 'monospace',
+            borderBottom: '1px solid #1e2d3d',
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '8px 24px'
+          }}>
+            <div>Status: {status}</div>
+            {connected && (
+              <>
+                <div>Socket ID: {connectionDetails.socketId || 'unknown'}</div>
+                <div>Transport: {connectionDetails.transport || 'unknown'}</div>
+                <div>Base Node: {connectionDetails.baseNodeUrl || BASE_NODE_URL}</div>
+                <div>Relay ID: <span style={{ color: '#5ccfe6' }}>{relayServerUrl || 'Unknown'}</span></div>
+                <div>Relay Status: <span style={{ 
+                  color: connectionDetails.relayStatus === 'connected_to_base' ? '#bae67e' : 
+                         connectionDetails.relayStatus === 'direct_to_base' ? '#5ccfe6' : '#ff8f40' 
+                }}>
+                  {connectionDetails.relayStatus === 'connected_to_base' ? 'Connected to Base' : 
+                   connectionDetails.relayStatus === 'direct_to_base' ? 'Direct to Base Node' : 
+                   connectionDetails.relayStatus === 'assigned_by_base' ? 'Assigned by Base' : 'Standalone'}
+                </span></div>
+                {connectionDetails.connectedUsers !== undefined && (
+                  <div>Users on Relay: {connectionDetails.connectedUsers}</div>
+                )}
+                {connectionDetails.ip && connectionDetails.port && (
+                  <div>Relay Address: {connectionDetails.ip}:{connectionDetails.port}</div>
+                )}
+              </>
+            )}
+            <div>Connection Status: <span style={{
+              color: relayStatus === 'online' ? '#bae67e' : '#ff8f40'
+            }}>{relayStatus}</span></div>
+            {deviceId && <div>Device ID: {deviceId.substring(0, 8)}...</div>}
           </div>
-          
-          {connected && (
+        )}
+        
+        {showAboutPage && (
+          <div style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(13, 17, 23, 0.95)',
+            zIndex: 1000,
+            padding: '20px',
+            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              marginBottom: '20px'
+            }}>
+              <h2 style={{ 
+                margin: 0, 
+                color: '#5ccfe6', 
+                fontFamily: '"Fira Code", monospace',
+                letterSpacing: '1px'
+              }}>About WhisperNet_</h2>
+              <button 
+                style={{ 
+                  background: 'none', 
+                  border: 'none', 
+                  color: '#636b78', 
+                  cursor: 'pointer',
+                  fontSize: 24
+                }}
+                onClick={() => setShowAboutPage(false)}
+              >
+                ×
+              </button>
+            </div>
+            
+            <div style={{
+              color: '#a2aabc',
+              fontFamily: '"Fira Code", monospace',
+              fontSize: '14px',
+              lineHeight: '1.6',
+              maxWidth: '800px',
+              margin: '0 auto',
+              padding: '20px',
+              background: '#171c28',
+              borderRadius: '8px',
+              border: '1px solid #1e2d3d'
+            }}>
+              <h3 style={{ color: '#bae67e', marginTop: 0 }}>What is WhisperNet?</h3>
+              <p>
+                WhisperNet is a secure, decentralized messaging platform designed for private communications. 
+                It uses end-to-end encryption and a distributed relay network to ensure your messages remain private and secure.
+              </p>
+              
+              <h3 style={{ color: '#bae67e' }}>How It Works</h3>
+              <p>
+                <span style={{ color: '#5ccfe6' }}>End-to-End Encryption:</span> All messages are encrypted on your device before being sent. 
+                Only the intended recipient can decrypt and read them.
+              </p>
+              <p>
+                <span style={{ color: '#5ccfe6' }}>Distributed Relay Network:</span> Instead of storing messages on a central server, 
+                WhisperNet uses a network of relay nodes to pass messages between users. This prevents any single point of failure or surveillance.
+              </p>
+              <p>
+                <span style={{ color: '#5ccfe6' }}>Message Bouncing:</span> When a recipient is offline, messages "bounce" through the relay network 
+                until delivery. Messages are never stored permanently on any server.
+              </p>
+              
+              <h3 style={{ color: '#bae67e' }}>Key Features</h3>
+              <ul style={{ paddingLeft: '20px' }}>
+                <li><span style={{ color: '#ff8f40' }}>Direct Messaging:</span> Send encrypted messages directly when both users are online.</li>
+                <li><span style={{ color: '#ff8f40' }}>Relay Messaging:</span> Send messages that will be delivered when the recipient comes online.</li>
+                <li><span style={{ color: '#ff8f40' }}>Identity Verification:</span> Verify the identity of your contacts to prevent man-in-the-middle attacks.</li>
+                <li><span style={{ color: '#ff8f40' }}>Offline Message Delivery:</span> Messages sent while you're offline will be delivered when you reconnect.</li>
+              </ul>
+              
+              <h3 style={{ color: '#bae67e' }}>Security Model</h3>
+              <p>
+                WhisperNet uses asymmetric cryptography (public/private key pairs) to secure communications:
+              </p>
+              <ul style={{ paddingLeft: '20px' }}>
+                <li>Each user generates a unique cryptographic identity</li>
+                <li>Messages are encrypted with the recipient's public key</li>
+                <li>Only the recipient's private key can decrypt the messages</li>
+                <li>Key verification ensures you're talking to the right person</li>
+              </ul>
+              
+              <h3 style={{ color: '#bae67e' }}>The Relay Network</h3>
+              <p>
+                The relay network is what makes WhisperNet unique:
+              </p>
+              <ul style={{ paddingLeft: '20px' }}>
+                <li>Messages bounce between relay nodes until delivered</li>
+                <li>No message is stored permanently on any single server</li>
+                <li>The network is resilient to outages and censorship</li>
+                <li>Your IP address is obscured from the recipient</li>
+              </ul>
+              
+              <h3 style={{ color: '#bae67e' }}>Privacy Considerations</h3>
+              <p>
+                WhisperNet is designed with privacy in mind:
+              </p>
+              <ul style={{ paddingLeft: '20px' }}>
+                <li>No phone number or email required to register</li>
+                <li>No metadata collection or user tracking</li>
+                <li>No permanent storage of messages</li>
+                <li>Open-source code for transparency</li>
+              </ul>
+              
+              <h3 style={{ color: '#bae67e' }}>Application Workflow</h3>
+              <div style={{ textAlign: 'center', margin: '20px 0' }}>
+                <div style={{ 
+                  background: '#0d1117', 
+                  padding: '20px', 
+                  borderRadius: '8px', 
+                  border: '1px solid #1e2d3d',
+                  display: 'inline-block',
+                  maxWidth: '100%',
+                  overflowX: 'auto'
+                }}>
+                  <pre style={{ 
+                    color: '#a2aabc', 
+                    margin: 0, 
+                    textAlign: 'left',
+                    fontFamily: '"Fira Code", monospace',
+                    fontSize: '12px',
+                    lineHeight: '1.5'
+                  }}>
+{`┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│                 │     │                 │     │                 │
+│  User Interface │     │  Relay Network  │     │  Encryption     │
+│                 │     │                 │     │  System         │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│ - Login         │     │ - Message       │     │ - Key           │
+│ - Chat UI       │     │   Routing       │     │   Generation    │
+│ - User List     │     │ - Relay         │     │ - Encryption    │
+│ - Message Input │     │   Bouncing      │     │ - Decryption    │
+│ - Verification  │     │ - User Status   │     │ - Verification  │
+└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
+         │                       │                       │
+         │                       │                       │
+         ▼                       ▼                       ▼
+┌───────────────────────────────────────────────────────────────┐
+│                                                               │
+│                    Secure Communication                       │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘`}
+                  </pre>
+                </div>
+              </div>
+              
+              <h3 style={{ color: '#bae67e' }}>Collaborators</h3>
+              <div style={{ 
+                display: 'flex', 
+                justifyContent: 'center', 
+                gap: '30px', 
+                flexWrap: 'wrap',
+                margin: '20px 0'
+              }}>
+                <div style={{ textAlign: 'center' }}>
+                  <a 
+                    href="https://github.com/Prathamesh0901" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    style={{ color: '#5ccfe6', textDecoration: 'none' }}
+                  >
+                    <div style={{ fontSize: '16px', marginBottom: '5px' }}>Prathmesh Mane</div>
+                    <div style={{ color: '#636b78', fontSize: '12px' }}>github.com/Prathamesh0901</div>
+                  </a>
+                </div>
+                
+                <div style={{ textAlign: 'center' }}>
+                  <a 
+                    href="https://github.com/JaidTamboli" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    style={{ color: '#5ccfe6', textDecoration: 'none' }}
+                  >
+                    <div style={{ fontSize: '16px', marginBottom: '5px' }}>Jaid Tamboli</div>
+                    <div style={{ color: '#636b78', fontSize: '12px' }}>github.com/JaidTamboli</div>
+                  </a>
+                </div>
+                
+                <div style={{ textAlign: 'center' }}>
+                  <a 
+                    href="https://github.com/sidinsearch" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    style={{ color: '#5ccfe6', textDecoration: 'none' }}
+                  >
+                    <div style={{ fontSize: '16px', marginBottom: '5px' }}>Siddharth Shinde</div>
+                    <div style={{ color: '#636b78', fontSize: '12px' }}>github.com/sidinsearch</div>
+                  </a>
+                </div>
+              </div>
+              
+              <div style={{ marginTop: '30px', textAlign: 'center', color: '#636b78', fontSize: '12px' }}>
+                WhisperNet © 2023 - Secure, Private, Decentralized Communications
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {securityAlert && (
+          <div style={{ 
+            background: '#4b1c1c', 
+            color: '#ff8f40', 
+            padding: '12px 24px', 
+            borderBottom: '1px solid #1e2d3d',
+            position: 'relative',
+            fontSize: 14
+          }}>
+            <div style={{ marginRight: 20 }}>{securityAlert.message}</div>
             <button 
               style={{ 
-                padding: '8px 16px', 
-                borderRadius: 4, 
-                background: '#4b1c1c', 
+                position: 'absolute', 
+                top: 12, 
+                right: 24, 
+                background: 'none', 
+                border: 'none', 
                 color: '#ff8f40', 
-                fontSize: 14, 
-                border: 'none',
                 cursor: 'pointer',
-                fontFamily: '"Fira Code", monospace',
-                marginRight: '12px'
-              }} 
-              onClick={handleDisconnect}
+                fontSize: 16
+              }}
+              onClick={dismissAlert}
             >
-              DISCONNECT
+              ×
             </button>
-          )}
-          
-          <button 
-            style={{ 
-              padding: '8px 16px', 
-              borderRadius: 4, 
-              background: '#1c3b4b', 
-              color: '#5ccfe6', 
-              fontSize: 14, 
-              border: 'none',
-              cursor: 'pointer',
-              fontFamily: '"Fira Code", monospace'
-            }} 
-            onClick={toggleAboutPage}
-          >
-            {showAboutPage ? 'BACK TO CHAT' : 'ABOUT'}
-          </button>
-        </div>
-      </header>
-      
-      {/* Connection info */}
-      {showConnectionInfo && (
-        <div style={{ padding: '0 24px' }}>
-          <ConnectionInfo
-            status={status}
-            connected={connected}
-            connectionDetails={connectionDetails}
-            relayServerUrl={relayServerUrl}
-            relayStatus={relayStatus}
-            deviceId={deviceId}
-            BASE_NODE_URL={BASE_NODE_URL}
-          />
-        </div>
-      )}
-      
-      {/* Security alert */}
-      {securityAlert && (
-        <div style={{ padding: '0 24px' }}>
-          <SecurityAlert alert={securityAlert} onDismiss={dismissAlert} />
-        </div>
-      )}
-      
-      {/* Main content */}
-      <div style={{ 
-        flex: 1,
-        display: 'flex',
-        height: 'calc(100vh - 69px - (showConnectionInfo ? 80 : 0) - (securityAlert ? 60 : 0))' // Subtract header height and optional elements
-      }}>
-        {showAboutPage ? (
-          <AboutPage />
-        ) : !connected ? (
-          <LoginScreen
-            username={username}
-            handleUsernameChange={handleUsernameChange}
-            handleUsernameSubmit={handleUsernameSubmit}
-            isCheckingUsername={isCheckingUsername}
-            usernameAvailable={usernameAvailable}
-            relayStatus={relayStatus}
-            status={status}
-            securityAlert={securityAlert}
-            dismissAlert={dismissAlert}
-            retryConnection={retryConnection}
-            getTimestamp={getTimestamp}
-          />
+          </div>
+        )}
+        
+        {!connected ? (
+          <div style={{
+            flex: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'center',
+            alignItems: 'center',
+            padding: '0 24px'
+          }}>
+            <div style={{ 
+              maxWidth: '400px',
+              width: '100%'
+            }}>
+              <div style={{ 
+                display: 'flex', 
+                flexDirection: 'column', 
+                alignItems: 'center', 
+                marginBottom: 24 
+              }}>
+                <img 
+                  src={appIcon}
+                  alt="WhisperNet Logo" 
+                  style={{ 
+                    width: '120px', 
+                    height: '120px', 
+                    marginBottom: 16,
+                    borderRadius: '50%',
+                    border: '2px solid #1e2d3d'
+                  }} 
+                />
+                <div style={{ fontSize: 14, color: '#5ccfe6', marginTop: 8 }}>
+                  {getTimestamp()} Initializing secure connection...
+                </div>
+              </div>
+              <form onSubmit={handleUsernameSubmit}>
+                <input
+                  style={{ 
+                    width: '100%', 
+                    padding: 10, 
+                    marginBottom: 12, 
+                    borderRadius: 4, 
+                    border: '1px solid #1e2d3d', 
+                    background: '#0d1117',
+                    color: '#a2aabc',
+                    fontSize: 16,
+                    fontFamily: '"Fira Code", monospace',
+                    boxSizing: 'border-box'
+                  }}
+                  placeholder="Enter username"
+                  value={username}
+                  onChange={e => {
+                    setUsername(e.target.value);
+                    setUsernameAvailable(true);
+                  }}
+                  required
+                />
+                {!usernameAvailable && <div style={{color: '#ff8f40', fontSize: 12, marginTop: -8, marginBottom: 8}}>Username not available.</div>}
+                <button
+                  style={{
+                    width: '100%',
+                    padding: 10,
+                    borderRadius: 4,
+                    background: relayStatus === 'online' ?
+                      'linear-gradient(90deg, #5ccfe6, #bae67e)' :
+                      '#636b78',
+                    color: '#171c28',
+                    fontWeight: 'bold',
+                    fontSize: 16,
+                    border: 'none',
+                    cursor: relayStatus === 'online' && !isCheckingUsername ? 'pointer' : 'not-allowed',
+                    fontFamily: '"Fira Code", monospace'
+                  }}
+                  type="submit"
+                  disabled={relayStatus !== 'online' || isCheckingUsername}
+                >
+                  {isCheckingUsername ? 'CHECKING...' : (relayStatus === 'online' ? 'AUTHENTICATE' : 'SERVER OFFLINE')}
+                </button>
+              </form>
+              {relayStatus !== 'online' && (
+                <button 
+                  style={{ 
+                    width: '100%', 
+                    padding: 8, 
+                    marginTop: 8,
+                    borderRadius: 4, 
+                    background: '#4b1c1c', 
+                    color: '#ff8f40', 
+                    fontSize: 14, 
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: '"Fira Code", monospace'
+                  }} 
+                  onClick={retryConnection}
+                >
+                  RETRY CONNECTION
+                </button>
+              )}
+              <div style={{ marginTop: 12, color: '#ff3333', textAlign: 'center', fontSize: 14 }}>
+                {status}
+              </div>
+            </div>
+          </div>
         ) : (
-          <ChatInterface
-            contacts={contacts}
-            activeChat={activeChat}
-            switchToChat={switchToChat}
-            onlineUsers={onlineUsers}
-            trustStatus={trustStatus}
-            recipient={recipient}
-            handleRecipientChange={handleRecipientChange}
-            message={message}
-            handleMessageChange={handleMessageChange}
-            handleSend={handleSend}
-            handleBounce={handleBounce}
-            recipientStatus={recipientStatus}
-            messages={messages}
-            username={username}
-            typing={typing}
-            messagesEndRef={messagesEndRef}
-            formatMessageTime={formatMessageTime}
-            getTimestamp={getTimestamp}
-            showTrustWarning={showTrustWarning}
-          />
+          <div style={{
+            flex: 1,
+            display: 'flex',
+            overflow: 'hidden'
+          }}>
+            {/* User list sidebar */}
+            <UserList 
+              users={onlineUsers.map(user => ({ username: user, online: true }))}
+              activeChats={activeChats}
+              unreadCounts={unreadCounts}
+              onSelectUser={openChat}
+              currentUser={username}
+              onClearHistory={handleClearAllHistory}
+              onNewChat={handleNewChat}
+            />
+            
+            {/* Main chat area */}
+            <div style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden'
+            }}>
+              {/* Welcome screen or active chat */}
+              {!currentChat ? (
+                <div style={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
+                  alignItems: 'center',
+                  padding: '0 24px',
+                  background: '#0d1117'
+                }}>
+                  <div style={{ 
+                    fontSize: 24, 
+                    color: '#5ccfe6', 
+                    marginBottom: 16,
+                    fontWeight: 'bold'
+                  }}>
+                    Welcome to WhisperNet
+                  </div>
+                  <div style={{ 
+                    fontSize: 16, 
+                    color: '#a2aabc', 
+                    textAlign: 'center',
+                    maxWidth: 500,
+                    lineHeight: 1.5
+                  }}>
+                    Select a user from the sidebar to start a conversation or click on a username when you receive a message.
+                  </div>
+                  <div style={{ 
+                    marginTop: 32,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center'
+                  }}>
+                    <div style={{ 
+                      fontSize: 14, 
+                      color: '#636b78', 
+                      marginBottom: 8 
+                    }}>
+                      Connected as:
+                    </div>
+                    <div style={{ 
+                      fontSize: 20, 
+                      color: '#bae67e', 
+                      fontWeight: 'bold' 
+                    }}>
+                      {username}
+                    </div>
+                  </div>
+                  <button 
+                    style={{ 
+                      marginTop: 32,
+                      padding: '8px 16px', 
+                      borderRadius: 4, 
+                      background: '#4b1c1c', 
+                      color: '#ff8f40', 
+                      fontSize: 14, 
+                      border: 'none',
+                      cursor: 'pointer',
+                      fontFamily: '"Fira Code", monospace'
+                    }} 
+                    onClick={handleDisconnect}
+                  >
+                    DISCONNECT
+                  </button>
+                </div>
+              ) : (
+                <ChatBox 
+                  recipient={currentChat}
+                  messages={chatMessages[currentChat] || []}
+                  username={username}
+                  onSendMessage={(recipient, messageText) => {
+                    console.log('Send message called with:', recipient, messageText);
+                    
+                    // Store the current values
+                    const currentRecipient = recipient;
+                    const currentMessage = messageText;
+                    
+                    // Set state
+                    setRecipient(currentRecipient);
+                    setMessage(currentMessage);
+                    
+                    // Check if recipient is online
+                    const isRecipientOnline = recipientStatuses[currentRecipient] && 
+                                             recipientStatuses[currentRecipient].online;
+                    
+                    if (!isRecipientOnline) {
+                      // Recipient is offline, suggest using relay
+                      const useRelay = window.confirm(
+                        `${currentRecipient} appears to be offline.\n\n` +
+                        `Would you like to send this as a relay message instead?\n` +
+                        `(The message will be delivered when they come online)`
+                      );
+                      
+                      if (useRelay) {
+                        // Use the relay function instead
+                        const relayEvent = { preventDefault: () => {} };
+                        
+                        // Show confirmation before relaying
+                        const confirmRelay = window.confirm(
+                          `RELAY MESSAGE\n\n` +
+                          `Your message to "${currentRecipient}" will be securely encrypted and will continuously bounce across the relay network\n` +
+                          `until ${currentRecipient} comes online or registers with the network.\n\n` +
+                          `It will not be stored at any single point for long, ensuring privacy and delivery reliability.\n\n` +
+                          `Do you want to continue?`
+                        );
+                        
+                        if (confirmRelay) {
+                          // Call relay function
+                          sendRelayMessage(currentRecipient, currentMessage);
+                        }
+                        return;
+                      } else {
+                        // User wants to try direct message anyway
+                        console.log('Attempting direct message to offline user:', currentRecipient);
+                      }
+                    }
+                    
+                    // Function to add message to chat history
+                    function addMessageToChat(from, to, messageText, encrypted) {
+                      const newMessage = {
+                        from: from,
+                        to: to,
+                        message: messageText,
+                        timestamp: Date.now(),
+                        fromDeviceId: deviceId,
+                        encrypted: encrypted
+                      };
+                      
+                      // Update chat messages
+                      setChatMessages(prev => {
+                        const updatedMessages = { ...prev };
+                        if (!updatedMessages[to]) {
+                          updatedMessages[to] = [];
+                        }
+                        updatedMessages[to] = [...updatedMessages[to], newMessage];
+                        
+                        // Save to localStorage
+                        saveChatHistory(username, to, updatedMessages[to]);
+                        
+                        return updatedMessages;
+                      });
+                    }
+                    
+                    // Function to send unencrypted message
+                    function sendUnencryptedMessage() {
+                      console.log('Sending unencrypted direct message to:', currentRecipient);
+                      
+                      if (!socketRef.current) {
+                        console.error('Socket not available for direct message');
+                        setSecurityAlert({
+                          username: 'System',
+                          message: 'Cannot send message: Connection not available',
+                          type: 'error'
+                        });
+                        return;
+                      }
+                      
+                      socketRef.current.emit('sendMessage', {
+                        to: currentRecipient,
+                        message: currentMessage,
+                        from: username,
+                        fromDeviceId: deviceId,
+                        timestamp: Date.now(),
+                        publicKey: keyPair ? keyPair.publicKey : null,
+                        encrypted: false
+                      });
+                      
+                      // Add message to chat
+                      addMessageToChat(username, currentRecipient, currentMessage, false);
+                    }
+                    
+                    // Function to send relay message
+                    function sendRelayMessage(to, msg) {
+                      if (!socketRef.current) {
+                        console.error('Socket not available for relay message');
+                        setSecurityAlert({
+                          username: 'System',
+                          message: 'Cannot send relay message: Connection not available',
+                          type: 'error'
+                        });
+                        return;
+                      }
+                      
+                      // Show sending indicator
+                      setStatus('Sending relay message...');
+                      
+                      // Function to add relay message to chat
+                      function addRelayMessageToChat(from, to, messageText, encrypted) {
+                        const newMessage = {
+                          from: from,
+                          to: to,
+                          message: messageText,
+                          timestamp: Date.now(),
+                          fromDeviceId: deviceId,
+                          relayed: true,
+                          encrypted: encrypted
+                        };
+                        
+                        // Update chat messages
+                        setChatMessages(prev => {
+                          const updatedMessages = { ...prev };
+                          if (!updatedMessages[to]) {
+                            updatedMessages[to] = [];
+                          }
+                          updatedMessages[to] = [...updatedMessages[to], newMessage];
+                          
+                          // Save to localStorage
+                          saveChatHistory(username, to, updatedMessages[to]);
+                          
+                          return updatedMessages;
+                        });
+                        
+                        // Show success message
+                        setSecurityAlert({
+                          username: 'System',
+                          message: `Message to ${to} will be delivered when they come online.`,
+                          type: 'info'
+                        });
+                        
+                        setStatus('Registered successfully');
+                      }
+                      
+                      // Send unencrypted relay message
+                      socketRef.current.emit('relayMessage', {
+                        to: to,
+                        message: msg,
+                        from: username,
+                        fromDeviceId: deviceId,
+                        timestamp: Date.now(),
+                        publicKey: keyPair ? keyPair.publicKey : null,
+                        encrypted: false
+                      }, (response) => {
+                        if (response && response.success) {
+                          // Add message to chat
+                          addRelayMessageToChat(username, to, msg, false);
+                        } else {
+                          // Show error message
+                          setSecurityAlert({
+                            username: 'System',
+                            message: `Failed to relay message: ${response && response.error ? response.error : 'Unknown error'}`,
+                            type: 'error'
+                          });
+                          setStatus('Registered successfully');
+                        }
+                      });
+                    }
+                    
+                    // Encrypt message if possible
+                    if (encryptionEnabled && publicKeys[currentRecipient]) {
+                      try {
+                        console.log('Attempting to encrypt direct message for:', currentRecipient);
+                        
+                        // Try to encrypt the message
+                        encryptMessage(currentMessage, publicKeys[currentRecipient])
+                          .then(encryptedMessage => {
+                            console.log('Successfully encrypted direct message');
+                            
+                            if (!socketRef.current) {
+                              console.error('Socket not available for encrypted message');
+                              setSecurityAlert({
+                                username: 'System',
+                                message: 'Cannot send message: Connection not available',
+                                type: 'error'
+                              });
+                              return;
+                            }
+                            
+                            // Send the encrypted message
+                            socketRef.current.emit('sendMessage', {
+                              to: currentRecipient,
+                              message: encryptedMessage,
+                              from: username,
+                              fromDeviceId: deviceId,
+                              timestamp: Date.now(),
+                              publicKey: keyPair ? keyPair.publicKey : null,
+                              encrypted: true
+                            });
+                            
+                            // Update chat messages with the unencrypted version for display
+                            addMessageToChat(username, currentRecipient, currentMessage, true);
+                          })
+                          .catch(error => {
+                            console.error('Failed to encrypt message:', error);
+                            // Send unencrypted as fallback
+                            sendUnencryptedMessage();
+                          });
+                      } catch (error) {
+                        console.error('Error in encryption:', error);
+                        // Send unencrypted as fallback
+                        sendUnencryptedMessage();
+                      }
+                    } else {
+                      // Send unencrypted
+                      sendUnencryptedMessage();
+                    }
+                  }}
+                  onRelayMessage={(recipient, messageText) => {
+                    console.log('Relay message called with:', recipient, messageText);
+                    
+                    // Store the current values
+                    const currentRecipient = recipient;
+                    const currentMessage = messageText;
+                    
+                    // Set state
+                    setRecipient(currentRecipient);
+                    setMessage(currentMessage);
+                    
+                    // Show confirmation before relaying
+                    const confirmRelay = window.confirm(
+                      `RELAY MESSAGE\n\n` +
+                      `Your message to "${currentRecipient}" will be securely encrypted and will continuously bounce across the relay network\n` +
+                      `until ${currentRecipient} comes online or registers with the network.\n\n` +
+                      `It will not be stored at any single point for long, ensuring privacy and delivery reliability.\n\n` +
+                      `Do you want to continue?`
+                    );
+                    
+                    if (!confirmRelay) {
+                      return; // User cancelled
+                    }
+                    
+                    // Call relay function directly with the values
+                    if (socketRef.current) {
+                      // Show sending indicator
+                      setStatus('Sending relay message...');
+                      
+                      // Function to add message to chat history
+                      function addRelayMessageToChat(from, to, messageText, encrypted) {
+                        const newMessage = {
+                          from: from,
+                          to: to,
+                          message: messageText,
+                          timestamp: Date.now(),
+                          fromDeviceId: deviceId,
+                          relayed: true,
+                          encrypted: encrypted
+                        };
+                        
+                        // Update chat messages
+                        setChatMessages(prev => {
+                          const updatedMessages = { ...prev };
+                          if (!updatedMessages[to]) {
+                            updatedMessages[to] = [];
+                          }
+                          updatedMessages[to] = [...updatedMessages[to], newMessage];
+                          
+                          // Save to localStorage
+                          saveChatHistory(username, to, updatedMessages[to]);
+                          
+                          return updatedMessages;
+                        });
+                        
+                        // Show success message
+                        setSecurityAlert({
+                          username: 'System',
+                          message: `Message to ${to} will be delivered when they come online.`,
+                          type: 'info'
+                        });
+                        
+                        setStatus('Registered successfully');
+                      }
+                      
+                      // Send unencrypted message first as a fallback
+                      function sendUnencryptedRelayMessage() {
+                        console.log('Sending unencrypted relay message to:', currentRecipient);
+                        
+                        socketRef.current.emit('relayMessage', {
+                          to: currentRecipient,
+                          message: currentMessage,
+                          from: username,
+                          fromDeviceId: deviceId,
+                          timestamp: Date.now(),
+                          publicKey: keyPair ? keyPair.publicKey : null,
+                          encrypted: false
+                        }, (response) => {
+                          if (response && response.success) {
+                            // Add message to chat
+                            addRelayMessageToChat(username, currentRecipient, currentMessage, false);
+                          } else {
+                            // Show error message
+                            setSecurityAlert({
+                              username: 'System',
+                              message: `Failed to relay message: ${response && response.error ? response.error : 'Unknown error'}`,
+                              type: 'error'
+                            });
+                            setStatus('Registered successfully');
+                          }
+                        });
+                      }
+                      
+                      // Try to encrypt if possible
+                      if (encryptionEnabled && publicKeys[currentRecipient]) {
+                        try {
+                          console.log('Attempting to encrypt relay message for:', currentRecipient);
+                          
+                          // Try to encrypt the message
+                          encryptMessage(currentMessage, publicKeys[currentRecipient])
+                            .then(encryptedMessage => {
+                              console.log('Successfully encrypted relay message');
+                              
+                              // Send the encrypted message
+                              socketRef.current.emit('relayMessage', {
+                                to: currentRecipient,
+                                message: encryptedMessage,
+                                from: username,
+                                fromDeviceId: deviceId,
+                                timestamp: Date.now(),
+                                publicKey: keyPair ? keyPair.publicKey : null,
+                                encrypted: true
+                              }, (response) => {
+                                if (response && response.success) {
+                                  // Add message to chat with the unencrypted version for display
+                                  addRelayMessageToChat(username, currentRecipient, currentMessage, true);
+                                } else {
+                                  console.error('Relay message failed:', response);
+                                  // Show error message
+                                  setSecurityAlert({
+                                    username: 'System',
+                                    message: `Failed to relay message: ${response && response.error ? response.error : 'Unknown error'}`,
+                                    type: 'error'
+                                  });
+                                  setStatus('Registered successfully');
+                                }
+                              });
+                            })
+                            .catch(error => {
+                              console.error('Failed to encrypt relay message:', error);
+                              // Send unencrypted as fallback
+                              sendUnencryptedRelayMessage();
+                            });
+                        } catch (error) {
+                          console.error('Error in relay encryption:', error);
+                          // Send unencrypted as fallback
+                          sendUnencryptedRelayMessage();
+                        }
+                      } else {
+                        // Send unencrypted
+                        sendUnencryptedRelayMessage();
+                      }
+                    } else {
+                      console.error('Socket not available for relay message');
+                      setSecurityAlert({
+                        username: 'System',
+                        message: 'Cannot send relay message: Connection not available',
+                        type: 'error'
+                      });
+                    }
+                  }}
+                  recipientStatus={recipientStatuses[currentChat] || { exists: false, online: false }}
+                  typing={typingUsers[currentChat] || false}
+                  onMessageChange={(message) => {
+                    // Send typing indicator
+                    if (socketRef.current && currentChat && message.length > 0) {
+                      socketRef.current.emit('typing', { to: currentChat });
+                    }
+                  }}
+                  onClose={() => closeChat(currentChat)}
+                  verificationStatus={verificationStatuses[currentChat]}
+                  onVerifyIdentity={handleVerifyIdentity}
+                />
+              )}
+              
+              {/* Connection status footer */}
+              <div style={{ 
+                display: 'flex', 
+                justifyContent: 'space-between', 
+                padding: '8px 16px',
+                borderTop: '1px solid #1e2d3d',
+                background: '#171c28'
+              }}>
+                <div style={{ 
+                  fontSize: 12, 
+                  color: '#636b78', 
+                  display: 'flex', 
+                  alignItems: 'center' 
+                }}>
+                  <div style={{ 
+                    width: 8, 
+                    height: 8, 
+                    borderRadius: '50%', 
+                    background: status.includes('Connected') || status.includes('Registered') ? '#bae67e' : '#ff3333',
+                    marginRight: 6 
+                  }}></div>
+                  {status.includes('Connected') || status.includes('Registered') ? 'SECURE CONNECTION' : 'CONNECTION LOST'}
+                </div>
+                
+                <button 
+                  style={{ 
+                    padding: '4px 12px', 
+                    borderRadius: 4, 
+                    background: '#4b1c1c', 
+                    color: '#ff8f40', 
+                    fontSize: 12, 
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontFamily: '"Fira Code", monospace'
+                  }} 
+                  onClick={handleDisconnect}
+                >
+                  DISCONNECT
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
+      
+      {/* Verification Modal */}
+      <VerificationModal
+        isOpen={showVerificationModal}
+        onClose={handleCancelVerification}
+        verificationInfo={currentVerification || {}}
+        onVerify={handleConfirmVerification}
+        onCancel={handleCancelVerification}
+        username={username}
+      />
     </div>
   );
 }
