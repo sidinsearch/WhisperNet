@@ -1657,7 +1657,7 @@ function App() {
       let finalMessage = message.trim();
       let isEncrypted = false;
       
-      // Encrypt the message if encryption is enabled and we have the recipient's public key
+      // Encrypt by default if we have the recipient's public key
       if (encryptionEnabled && publicKeys[recipient]) {
         try {
           finalMessage = await encryptMessage(message.trim(), publicKeys[recipient]);

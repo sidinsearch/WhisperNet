@@ -781,6 +781,54 @@ body {
   color: var(--text-primary);
 }
 
+/* Encryption Toggle */
+.encryption-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.encryption-toggle.active {
+  background: rgba(0, 212, 170, 0.15);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.encryption-toggle.inactive {
+  background: rgba(231, 76, 60, 0.15);
+  border-color: var(--status-offline);
+  color: var(--status-offline);
+  opacity: 0.7;
+}
+
+.encryption-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.encryption-icon {
+  font-size: 12px;
+}
+
+.encryption-label {
+  font-weight: 500;
+}
+
+.encrypted-badge {
+  margin-left: 6px;
+  font-size: 10px;
+}
+
+.decryption-failed {
+  color: #f39c12;
+}
+
 /* Messages */
 .messages-container {
   flex: 1;
@@ -823,6 +871,7 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   margin-bottom: 6px;
 }
 

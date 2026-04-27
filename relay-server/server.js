@@ -133,7 +133,21 @@ const connectToBaseNode = () => {
 
   // Handle message delivery from base node
   baseSocket.on('deliverMessage', ({ from, to, message, fromDeviceId, timestamp, encrypted, publicKey }) => {
-    console.log(`Delivering message from base node: ${from} -> ${to}`);
+    // Validate message payload
+    if (!to) {
+      console.log('Invalid message: missing recipient');
+      return;
+    }
+    if (!from) {
+      console.log('Invalid message: missing sender');
+      return;
+    }
+    if (encrypted && (!message || message.length === 0)) {
+      console.log('Invalid encrypted message: empty content');
+      return;
+    }
+
+    console.log(`Delivering message from base node: ${from} -> ${to} ${encrypted ? '(encrypted)' : ''}`);
     
     if (userSockets[to]) {
       userSockets[to].emit('receiveMessage', { 
@@ -389,8 +403,29 @@ io.on('connection', (socket) => {
       if (ack) ack({ delivered: false, reason: 'Not registered' });
       return;
     }
+
+    // Validate encryption edge cases
+    if (encrypted && (!message || message.length === 0)) {
+      console.log(`Encrypted message but no content`);
+      if (ack) ack({ delivered: false, reason: 'Invalid encrypted message' });
+      return;
+    }
+
+    // Validate public key is provided when encryption is enabled
+    if (encrypted && !publicKey) {
+      console.log(`Message marked encrypted but no public key provided`);
+      if (ack) ack({ delivered: false, reason: 'Public key required for encrypted messages' });
+      return;
+    }
+
+    // Validate public key format
+    if (publicKey && typeof publicKey !== 'object') {
+      console.log(`Invalid public key format`);
+      if (ack) ack({ delivered: false, reason: 'Invalid public key format' });
+      return;
+    }
     
-    console.log(`Message from ${fromUser.username} to ${to}: ${encrypted ? '[ENCRYPTED]' : message}`);
+    console.log(`Message from ${fromUser.username} to ${to} ${encrypted ? '(encrypted)' : ''}`);
     
     // Check if recipient is connected to this relay
     if (userSockets[to]) {

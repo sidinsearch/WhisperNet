@@ -20,9 +20,12 @@ const VerificationModal = ({
     verifiedAt
   } = verificationInfo;
 
-  // Determine modal type based on status
   const isWarning = status === 'key_mismatch' || status === 'device_changed';
   const isNewContact = status === 'new_contact';
+
+  const warningColor = '#ef4444';
+  const infoColor = '#3b82f6';
+  const successColor = '#22c55e';
 
   return (
     <div style={{
@@ -31,22 +34,21 @@ const VerificationModal = ({
       left: 0,
       right: 0,
       bottom: 0,
-      backgroundColor: 'rgba(0, 0, 0, 0.7)',
+      backgroundColor: 'rgba(0, 0, 0, 0.5)',
       display: 'flex',
       justifyContent: 'center',
       alignItems: 'center',
       zIndex: 1000
     }}>
       <div style={{
-        backgroundColor: '#171c28',
+        backgroundColor: 'var(--bg-primary)',
         borderRadius: 8,
-        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
         width: '90%',
         maxWidth: 500,
         padding: 24,
-        border: isWarning ? '1px solid #ff3333' : '1px solid #1e2d3d'
+        border: isWarning ? `1px solid ${warningColor}` : '1px solid var(--border-color)'
       }}>
-        {/* Header */}
         <div style={{
           display: 'flex',
           justifyContent: 'space-between',
@@ -54,7 +56,7 @@ const VerificationModal = ({
           marginBottom: 16
         }}>
           <h2 style={{
-            color: isWarning ? '#ff3333' : (isNewContact ? '#5ccfe6' : '#bae67e'),
+            color: isWarning ? warningColor : (isNewContact ? infoColor : successColor),
             margin: 0,
             fontSize: 18
           }}>
@@ -66,7 +68,7 @@ const VerificationModal = ({
             style={{
               background: 'none',
               border: 'none',
-              color: '#636b78',
+              color: 'var(--text-muted)',
               fontSize: 20,
               cursor: 'pointer'
             }}
@@ -75,148 +77,175 @@ const VerificationModal = ({
           </button>
         </div>
 
-        {/* Content */}
         <div style={{
-          backgroundColor: '#0d1117',
+          backgroundColor: 'var(--bg-secondary)',
           padding: 16,
           borderRadius: 4,
           marginBottom: 20,
-          border: '1px solid #1e2d3d'
+          border: '1px solid var(--border-color)'
         }}>
           <div style={{ marginBottom: 12 }}>
-            <div style={{ color: '#636b78', fontSize: 12, marginBottom: 4 }}>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 4 }}>
               CONTACT
             </div>
-            <div style={{ color: '#a2aabc', fontSize: 16, fontWeight: 'bold' }}>
+            <div style={{ color: 'var(--text-primary)', fontSize: 16, fontWeight: 'bold' }}>
               {contactUsername}
             </div>
           </div>
 
           <div style={{ marginBottom: 12 }}>
-            <div style={{ color: '#636b78', fontSize: 12, marginBottom: 4 }}>
+            <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 4 }}>
               CURRENT KEY FINGERPRINT
             </div>
             <div style={{ 
-              color: '#5ccfe6', 
-              fontFamily: '"Fira Code", monospace',
-              fontSize: 14,
-              padding: '4px 8px',
-              background: 'rgba(92, 207, 230, 0.1)',
-              borderRadius: 4,
-              display: 'inline-block'
+              color: infoColor, 
+              fontSize: 12,
+              fontFamily: 'monospace',
+              wordBreak: 'break-all'
             }}>
-              {fingerprint}
+              {fingerprint || 'N/A'}
             </div>
           </div>
 
           {previousFingerprint && (
             <div style={{ marginBottom: 12 }}>
-              <div style={{ color: '#636b78', fontSize: 12, marginBottom: 4 }}>
+              <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 4 }}>
                 PREVIOUS KEY FINGERPRINT
               </div>
               <div style={{ 
-                color: '#ff8f40', 
-                fontFamily: '"Fira Code", monospace',
-                fontSize: 14,
-                padding: '4px 8px',
-                background: 'rgba(255, 143, 64, 0.1)',
-                borderRadius: 4,
-                display: 'inline-block',
-                textDecoration: 'line-through'
+                color: warningColor, 
+                fontSize: 12,
+                fontFamily: 'monospace',
+                wordBreak: 'break-all'
               }}>
                 {previousFingerprint}
               </div>
             </div>
           )}
 
+          {message && (
+            <div style={{ 
+              marginTop: 12, 
+              padding: 12, 
+              backgroundColor: isWarning ? 'rgba(239, 68, 68, 0.1)' : 'rgba(59, 130, 246, 0.1)',
+              borderRadius: 4,
+              border: `1px solid ${isWarning ? warningColor : infoColor}`
+            }}>
+              <div style={{ color: isWarning ? warningColor : infoColor, fontSize: 13 }}>
+                {message}
+              </div>
+            </div>
+          )}
+
           {verifiedAt && (
-            <div>
-              <div style={{ color: '#636b78', fontSize: 12, marginBottom: 4 }}>
-                LAST VERIFIED
-              </div>
-              <div style={{ color: '#a2aabc', fontSize: 14 }}>
-                {formatVerificationTime(verifiedAt)}
-              </div>
+            <div style={{ 
+              marginTop: 12, 
+              color: 'var(--text-muted)', 
+              fontSize: 12 
+            }}>
+              Verified: {formatVerificationTime(verifiedAt)}
             </div>
           )}
         </div>
 
-        {/* Message */}
-        <div style={{
-          padding: 16,
-          backgroundColor: isWarning ? 'rgba(255, 51, 51, 0.1)' : 'rgba(186, 230, 126, 0.1)',
-          borderRadius: 4,
-          marginBottom: 20,
-          borderLeft: isWarning ? '3px solid #ff3333' : '3px solid #bae67e'
-        }}>
-          <p style={{ 
-            color: isWarning ? '#ff8f40' : '#bae67e', 
-            margin: 0,
-            fontSize: 14,
-            lineHeight: 1.5
+        {isNewContact && (
+          <div style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 12
           }}>
-            {isWarning ? (
-              <>
-                <strong>Warning:</strong> {message}
-                <br /><br />
-                This could happen if:
-                <ul style={{ margin: '8px 0', paddingLeft: 20 }}>
-                  <li>The contact logged in from a new device</li>
-                  <li>The contact cleared their browser data</li>
-                  <li>Someone is attempting to impersonate this contact</li>
-                </ul>
-              </>
-            ) : isNewContact ? (
-              <>
-                You haven't previously verified the identity of this user. 
-                <br /><br />
-                Verifying now will allow you to detect if their identity changes in the future.
-              </>
-            ) : (
-              message
-            )}
-          </p>
-        </div>
-
-        {/* Actions */}
-        <div style={{
-          display: 'flex',
-          justifyContent: 'flex-end',
-          gap: 12
-        }}>
-          <button
-            onClick={onCancel}
-            style={{
-              background: 'transparent',
-              border: '1px solid #1e2d3d',
-              color: '#636b78',
-              padding: '8px 16px',
-              borderRadius: 4,
-              fontSize: 14,
-              cursor: 'pointer'
-            }}
-          >
-            {isWarning ? 'Cancel' : 'Close'}
-          </button>
-          
-          {(isWarning || isNewContact) && (
+            <button
+              onClick={onCancel}
+              style={{
+                padding: '10px 20px',
+                backgroundColor: 'var(--bg-tertiary)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 4,
+                color: 'var(--text-secondary)',
+                fontSize: 14,
+                cursor: 'pointer'
+              }}
+            >
+              Cancel
+            </button>
             <button
               onClick={onVerify}
               style={{
-                background: isWarning ? '#ff3333' : '#5ccfe6',
-                color: '#171c28',
+                padding: '10px 20px',
+                backgroundColor: infoColor,
                 border: 'none',
-                padding: '8px 16px',
                 borderRadius: 4,
+                color: '#fff',
                 fontSize: 14,
                 fontWeight: 'bold',
                 cursor: 'pointer'
               }}
             >
-              {isWarning ? 'Trust Anyway' : 'Verify Identity'}
+              Verify & Trust Key
             </button>
-          )}
-        </div>
+          </div>
+        )}
+
+        {isWarning && (
+          <div style={{
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 12
+          }}>
+            <button
+              onClick={onCancel}
+              style={{
+                padding: '10px 20px',
+                backgroundColor: 'var(--bg-tertiary)',
+                border: '1px solid var(--border-color)',
+                borderRadius: 4,
+                color: 'var(--text-secondary)',
+                fontSize: 14,
+                cursor: 'pointer'
+              }}
+            >
+              Ignore Warning
+            </button>
+            <button
+              onClick={onVerify}
+              style={{
+                padding: '10px 20px',
+                backgroundColor: warningColor,
+                border: 'none',
+                borderRadius: 4,
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              Confirm New Key
+            </button>
+          </div>
+        )}
+
+        {!isNewContact && !isWarning && (
+          <div style={{
+            display: 'flex',
+            justifyContent: 'flex-end'
+          }}>
+            <button
+              onClick={onClose}
+              style={{
+                padding: '10px 20px',
+                backgroundColor: 'var(--accent-primary)',
+                border: 'none',
+                borderRadius: 4,
+                color: '#fff',
+                fontSize: 14,
+                fontWeight: 'bold',
+                cursor: 'pointer'
+              }}
+            >
+              Close
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

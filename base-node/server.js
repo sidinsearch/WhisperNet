@@ -249,7 +249,24 @@ io.on('connection', (socket) => {
   
   // Handle message routing
   socket.on('routeMessage', ({ from, to, message, deviceId, encrypted = false, publicKey = null, timestamp = null }, ack) => {
-    console.log(`Routing message from ${from} to ${to}`);
+    // Validate message payload
+    if (!to) {
+      console.log('Invalid message: missing recipient');
+      if (ack) ack({ delivered: false, reason: 'Missing recipient' });
+      return;
+    }
+    if (!from) {
+      console.log('Invalid message: missing sender');
+      if (ack) ack({ delivered: false, reason: 'Missing sender' });
+      return;
+    }
+    if (encrypted && (!message || message.length === 0)) {
+      console.log('Invalid encrypted message: empty content');
+      if (ack) ack({ delivered: false, reason: 'Invalid encrypted message' });
+      return;
+    }
+
+    console.log(`Routing message from ${from} to ${to} ${encrypted ? '(encrypted)' : ''}`);
     
     const targetUser = userRegistry[to];
     if (!targetUser) {
@@ -312,7 +329,28 @@ io.on('connection', (socket) => {
       return;
     }
 
-    console.log(`Direct message from ${fromUser.username} to ${to}`);
+    // Validate encryption edge cases
+    if (encrypted && (!message || message.length === 0)) {
+      console.log(`Encrypted message but no content`);
+      if (ack) ack({ delivered: false, reason: 'Invalid encrypted message' });
+      return;
+    }
+
+    // Validate public key is provided when encryption is enabled
+    if (encrypted && !publicKey) {
+      console.log(`Message marked encrypted but no public key provided`);
+      if (ack) ack({ delivered: false, reason: 'Public key required for encrypted messages' });
+      return;
+    }
+
+    // Validate public key format
+    if (publicKey && typeof publicKey !== 'object') {
+      console.log(`Invalid public key format`);
+      if (ack) ack({ delivered: false, reason: 'Invalid public key format' });
+      return;
+    }
+
+    console.log(`Direct message from ${fromUser.username} to ${to} ${encrypted ? '(encrypted)' : ''}`);
     
     // Route the message using the routeMessage logic
     const from = fromUser.username;

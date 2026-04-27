@@ -93,6 +93,11 @@ const ChatBox = ({
                 <span className="message-time">{formatMessageTime(msg.timestamp)}</span>
               </div>
               <div className="message-content">{msg.message}</div>
+              {msg.decryptionStatus === 'failed' && (
+                <div className="message-status decryption-failed">
+                  ⚠️ Could not decrypt this message
+                </div>
+              )}
               {msg.status === 'bounced' && (
                 <div className="message-status bounced">
                   ⏳ Will be delivered when recipient comes online
@@ -121,7 +126,7 @@ const ChatBox = ({
         <form className="message-input-form" onSubmit={handleSend}>
           <input
             className="message-input"
-            placeholder="Type a message..."
+            placeholder="Type a secure message..."
             value={messageInput}
             onChange={handleMessageChange}
             required
