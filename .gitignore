@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Build output
+build/
+*/build/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OpenCode
+.opencode/
