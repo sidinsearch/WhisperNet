@@ -5,8 +5,8 @@ import FingerprintJS from '@fingerprintjs/fingerprintjs';
 import ChatBox from './components/ChatBox';
 import UserList from './components/UserList';
 import VerificationModal from './components/VerificationModal';
-// Import the icon directly
 import appIcon from './assets/icon.png';
+import './styles.css';
 import { 
   saveChatHistory, 
   loadChatHistory, 
@@ -164,6 +164,22 @@ function App() {
   const [showVerificationModal, setShowVerificationModal] = useState(false);
   const [currentVerification, setCurrentVerification] = useState(null);
   const [storageResetDetected, setStorageResetDetected] = useState(false);
+  
+  // Theme state
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('whispernet-theme');
+    return saved || 'dark';
+  });
+  
+  // Apply theme on change
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('whispernet-theme', theme);
+  }, [theme]);
+  
+  const toggleTheme = () => {
+    setTheme(prev => prev === 'dark' ? 'light' : 'dark');
+  };
   
   const socketRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -1968,391 +1984,116 @@ function App() {
   };
 
   return (
-    <div style={{ 
-      background: '#0a0e14', 
-      minHeight: '100vh',
-      width: '100vw',
-      height: '100vh',
-      color: '#a2aabc', 
-      display: 'flex', 
-      flexDirection: 'column',
-      fontFamily: '"Fira Code", monospace',
-      overflow: 'hidden'
-    }}>
-      <div style={{ 
-        background: '#171c28', 
-        flex: 1,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden'
-      }}>
-        <div style={{ 
-          display: 'flex', 
-          justifyContent: 'space-between', 
-          alignItems: 'center',
-          padding: '16px 24px',
-          borderBottom: '1px solid #1e2d3d'
-        }}>
-          <h2 style={{ 
-            margin: 0, 
-            color: '#5ccfe6', 
-            fontFamily: '"Fira Code", monospace',
-            letterSpacing: '1px'
-          }}>WhisperNet_</h2>
-          <div style={{ display: 'flex', gap: '10px' }}>
-            <div style={{ 
-              fontSize: 12, 
-              padding: '4px 8px', 
-              borderRadius: 4, 
-              background: relayStatus === 'online' ? '#1c4b3c' : '#4b1c1c',
-              color: relayStatus === 'online' ? '#5ccfe6' : '#ff8f40',
-              cursor: 'pointer'
-            }} onClick={() => setShowConnectionInfo(!showConnectionInfo)}>
-              {relayStatus === 'online' ? 'Online' : 
-               relayStatus === 'checking' ? 'Checking...' : 'Offline'}
-            </div>
-            <div style={{ 
-              fontSize: 12, 
-              padding: '4px 8px', 
-              borderRadius: 4, 
-              background: '#1c3b4b',
-              color: '#5ccfe6',
-              cursor: 'pointer'
-            }} onClick={() => setShowAboutPage(true)}>
-              About
-            </div>
-          </div>
+    <div className="app-container">
+      <div className="app-header">
+        <div className="app-logo">
+          <img src={appIcon} alt="WhisperNet" className="logo-img" />
+          <h1>WhisperNet</h1>
         </div>
+        <div className="header-actions">
+          <div className="connection-badge" onClick={() => setShowConnectionInfo(!showConnectionInfo)}>
+            <span className={`status-dot ${relayStatus}`}></span>
+            <span>{relayStatus === 'online' ? 'Connected' : relayStatus === 'checking' ? 'Connecting...' : 'Offline'}</span>
+          </div>
+          <div className="theme-toggle" onClick={toggleTheme}>
+            <span className="theme-icon">{theme === 'dark' ? '🌙' : '☀️'}</span>
+            <span className="theme-label">{theme === 'dark' ? 'Dark' : 'Light'}</span>
+          </div>
+          <button className="info-btn" onClick={() => setShowAboutPage(true)}>
+            About
+          </button>
+        </div>
+      </div>
         
         {showConnectionInfo && (
-          <div style={{ 
-            background: '#0d1117', 
-            padding: '8px 24px', 
-            fontSize: 12, 
-            fontFamily: 'monospace',
-            borderBottom: '1px solid #1e2d3d',
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: '8px 24px'
-          }}>
-            <div>Status: {status}</div>
+          <div className="connection-panel">
+            <span><span className="label">Status:</span> {status}</span>
             {connected && (
               <>
-                <div>Socket ID: {connectionDetails.socketId || 'unknown'}</div>
-                <div>Transport: {connectionDetails.transport || 'unknown'}</div>
-                <div>Base Node: {connectionDetails.baseNodeUrl || BASE_NODE_URL}</div>
-                <div>Relay ID: <span style={{ color: '#5ccfe6' }}>{relayServerUrl || 'Unknown'}</span></div>
-                <div>Relay Status: <span style={{ 
-                  color: connectionDetails.relayStatus === 'connected_to_base' ? '#bae67e' : 
-                         connectionDetails.relayStatus === 'direct_to_base' ? '#5ccfe6' : '#ff8f40' 
-                }}>
+                <span><span className="label">Socket:</span> <span className="value">{connectionDetails.socketId || 'unknown'}</span></span>
+                <span><span className="label">Transport:</span> <span className="value">{connectionDetails.transport || 'unknown'}</span></span>
+                <span><span className="label">Relay:</span> <span className="value">{relayServerUrl || 'Unknown'}</span></span>
+                <span><span className="label">Type:</span> <span className="value">
                   {connectionDetails.relayStatus === 'connected_to_base' ? 'Connected to Base' : 
-                   connectionDetails.relayStatus === 'direct_to_base' ? 'Direct to Base Node' : 
+                   connectionDetails.relayStatus === 'direct_to_base' ? 'Direct to Base' : 
                    connectionDetails.relayStatus === 'assigned_by_base' ? 'Assigned by Base' : 'Standalone'}
-                </span></div>
-                {connectionDetails.connectedUsers !== undefined && (
-                  <div>Users on Relay: {connectionDetails.connectedUsers}</div>
-                )}
-                {connectionDetails.ip && connectionDetails.port && (
-                  <div>Relay Address: {connectionDetails.ip}:{connectionDetails.port}</div>
-                )}
+                </span></span>
               </>
             )}
-            <div>Connection Status: <span style={{
-              color: relayStatus === 'online' ? '#bae67e' : '#ff8f40'
-            }}>{relayStatus}</span></div>
-            {deviceId && <div>Device ID: {deviceId.substring(0, 8)}...</div>}
+            {deviceId && <span><span className="label">Device:</span> <span className="value">{deviceId.substring(0, 8)}...</span></span>}
           </div>
         )}
         
         {showAboutPage && (
-          <div style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(13, 17, 23, 0.95)',
-            zIndex: 1000,
-            padding: '20px',
-            overflowY: 'auto',
-            display: 'flex',
-            flexDirection: 'column'
-          }}>
-            <div style={{
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-              marginBottom: '20px'
-            }}>
-              <h2 style={{ 
-                margin: 0, 
-                color: '#5ccfe6', 
-                fontFamily: '"Fira Code", monospace',
-                letterSpacing: '1px'
-              }}>About WhisperNet_</h2>
-              <button 
-                style={{ 
-                  background: 'none', 
-                  border: 'none', 
-                  color: '#636b78', 
-                  cursor: 'pointer',
-                  fontSize: 24
-                }}
-                onClick={() => setShowAboutPage(false)}
-              >
-                ×
-              </button>
-            </div>
-            
-            <div style={{
-              color: '#a2aabc',
-              fontFamily: '"Fira Code", monospace',
-              fontSize: '14px',
-              lineHeight: '1.6',
-              maxWidth: '800px',
-              margin: '0 auto',
-              padding: '20px',
-              background: '#171c28',
-              borderRadius: '8px',
-              border: '1px solid #1e2d3d'
-            }}>
-              <h3 style={{ color: '#bae67e', marginTop: 0 }}>What is WhisperNet?</h3>
-              <p>
-                WhisperNet is a secure, decentralized messaging platform designed for private communications. 
-                It uses end-to-end encryption and a distributed relay network to ensure your messages remain private and secure.
-              </p>
-              
-              <h3 style={{ color: '#bae67e' }}>How It Works</h3>
-              <p>
-                <span style={{ color: '#5ccfe6' }}>End-to-End Encryption:</span> All messages are encrypted on your device before being sent. 
-                Only the intended recipient can decrypt and read them.
-              </p>
-              <p>
-                <span style={{ color: '#5ccfe6' }}>Distributed Relay Network:</span> Instead of storing messages on a central server, 
-                WhisperNet uses a network of relay nodes to pass messages between users. This prevents any single point of failure or surveillance.
-              </p>
-              <p>
-                <span style={{ color: '#5ccfe6' }}>Message Bouncing:</span> When a recipient is offline, messages "bounce" through the relay network 
-                until delivery. Messages are never stored permanently on any server.
-              </p>
-              
-              <h3 style={{ color: '#bae67e' }}>Key Features</h3>
-              <ul style={{ paddingLeft: '20px' }}>
-                <li><span style={{ color: '#ff8f40' }}>Direct Messaging:</span> Send encrypted messages directly when both users are online.</li>
-                <li><span style={{ color: '#ff8f40' }}>Relay Messaging:</span> Send messages that will be delivered when the recipient comes online.</li>
-                <li><span style={{ color: '#ff8f40' }}>Identity Verification:</span> Verify the identity of your contacts to prevent man-in-the-middle attacks.</li>
-                <li><span style={{ color: '#ff8f40' }}>Offline Message Delivery:</span> Messages sent while you're offline will be delivered when you reconnect.</li>
-              </ul>
-              
-              <h3 style={{ color: '#bae67e' }}>Security Model</h3>
-              <p>
-                WhisperNet uses asymmetric cryptography (public/private key pairs) to secure communications:
-              </p>
-              <ul style={{ paddingLeft: '20px' }}>
-                <li>Each user generates a unique cryptographic identity</li>
-                <li>Messages are encrypted with the recipient's public key</li>
-                <li>Only the recipient's private key can decrypt the messages</li>
-                <li>Key verification ensures you're talking to the right person</li>
-              </ul>
-              
-              <h3 style={{ color: '#bae67e' }}>The Relay Network</h3>
-              <p>
-                The relay network is what makes WhisperNet unique:
-              </p>
-              <ul style={{ paddingLeft: '20px' }}>
-                <li>Messages bounce between relay nodes until delivered</li>
-                <li>No message is stored permanently on any single server</li>
-                <li>The network is resilient to outages and censorship</li>
-                <li>Your IP address is obscured from the recipient</li>
-              </ul>
-              
-              <h3 style={{ color: '#bae67e' }}>Privacy Considerations</h3>
-              <p>
-                WhisperNet is designed with privacy in mind:
-              </p>
-              <ul style={{ paddingLeft: '20px' }}>
-                <li>No phone number or email required to register</li>
-                <li>No metadata collection or user tracking</li>
-                <li>No permanent storage of messages</li>
-                <li>Open-source code for transparency</li>
-              </ul>
-              
-              <h3 style={{ color: '#bae67e' }}>Application Workflow</h3>
-              <div style={{ textAlign: 'center', margin: '20px 0' }}>
-                <div style={{ 
-                  background: '#0d1117', 
-                  padding: '20px', 
-                  borderRadius: '8px', 
-                  border: '1px solid #1e2d3d',
-                  display: 'inline-block',
-                  maxWidth: '100%',
-                  overflowX: 'auto'
-                }}>
-                  <pre style={{ 
-                    color: '#a2aabc', 
-                    margin: 0, 
-                    textAlign: 'left',
-                    fontFamily: '"Fira Code", monospace',
-                    fontSize: '12px',
-                    lineHeight: '1.5'
-                  }}>
-{`┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│                 │     │                 │     │                 │
-│  User Interface │     │  Relay Network  │     │  Encryption     │
-│                 │     │                 │     │  System         │
-└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
-         │                       │                       │
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│ - Login         │     │ - Message       │     │ - Key           │
-│ - Chat UI       │     │   Routing       │     │   Generation    │
-│ - User List     │     │ - Relay         │     │ - Encryption    │
-│ - Message Input │     │   Bouncing      │     │ - Decryption    │
-│ - Verification  │     │ - User Status   │     │ - Verification  │
-└────────┬────────┘     └────────┬────────┘     └────────┬────────┘
-         │                       │                       │
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌───────────────────────────────────────────────────────────────┐
-│                                                               │
-│                    Secure Communication                       │
-│                                                               │
-└───────────────────────────────────────────────────────────────┘`}
-                  </pre>
-                </div>
+          <div className="about-overlay" onClick={() => setShowAboutPage(false)}>
+            <div className="about-content" onClick={(e) => e.stopPropagation()}>
+              <div className="about-header">
+                <h2>About WhisperNet</h2>
+                <button className="about-close" onClick={() => setShowAboutPage(false)}>×</button>
               </div>
               
-              <h3 style={{ color: '#bae67e' }}>Collaborators</h3>
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'center', 
-                gap: '30px', 
-                flexWrap: 'wrap',
-                margin: '20px 0'
-              }}>
-                <div style={{ textAlign: 'center' }}>
-                  <a 
-                    href="https://github.com/Prathamesh0901" 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    style={{ color: '#5ccfe6', textDecoration: 'none' }}
-                  >
-                    <div style={{ fontSize: '16px', marginBottom: '5px' }}>Prathmesh Mane</div>
-                    <div style={{ color: '#636b78', fontSize: '12px' }}>github.com/Prathamesh0901</div>
-                  </a>
-                </div>
-                
-                <div style={{ textAlign: 'center' }}>
-                  <a 
-                    href="https://github.com/JaidTamboli" 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    style={{ color: '#5ccfe6', textDecoration: 'none' }}
-                  >
-                    <div style={{ fontSize: '16px', marginBottom: '5px' }}>Jaid Tamboli</div>
-                    <div style={{ color: '#636b78', fontSize: '12px' }}>github.com/JaidTamboli</div>
-                  </a>
-                </div>
-                
-                <div style={{ textAlign: 'center' }}>
-                  <a 
-                    href="https://github.com/sidinsearch" 
-                    target="_blank" 
-                    rel="noopener noreferrer"
-                    style={{ color: '#5ccfe6', textDecoration: 'none' }}
-                  >
-                    <div style={{ fontSize: '16px', marginBottom: '5px' }}>Siddharth Shinde</div>
-                    <div style={{ color: '#636b78', fontSize: '12px' }}>github.com/sidinsearch</div>
-                  </a>
-                </div>
+              <div className="about-section">
+                <h3>What is WhisperNet?</h3>
+                <p>
+                  WhisperNet is a secure, decentralized messaging platform designed for private communications. 
+                  It uses end-to-end encryption and a distributed relay network to ensure your messages remain private and secure.
+                </p>
               </div>
               
-              <div style={{ marginTop: '30px', textAlign: 'center', color: '#636b78', fontSize: '12px' }}>
-                WhisperNet © 2023 - Secure, Private, Decentralized Communications
+              <div className="about-section">
+                <h3>Key Features</h3>
+                <ul>
+                  <li><strong>Direct Messaging</strong> - Send encrypted messages when both users are online</li>
+                  <li><strong>Relay Messaging</strong> - Send messages that will be delivered when the recipient comes online</li>
+                  <li><strong>Identity Verification</strong> - Verify contacts to prevent man-in-the-middle attacks</li>
+                  <li><strong>Offline Delivery</strong> - Messages sent while offline will be delivered when you reconnect</li>
+                </ul>
+              </div>
+              
+              <div className="about-section">
+                <h3>Security</h3>
+                <p>
+                  WhisperNet uses asymmetric cryptography to secure all communications. Each user has a unique 
+                  cryptographic identity, and only the intended recipient can decrypt your messages.
+                </p>
+              </div>
+              
+              <div className="about-section">
+                <h3>Privacy</h3>
+                <p>
+                  No phone number or email required. No metadata collection. No permanent message storage. 
+                  Your identity remains anonymous while your messages stay secure.
+                </p>
+              </div>
+              
+              <div className="about-footer">
+                WhisperNet © 2026 - Secure, Private, Decentralized
               </div>
             </div>
           </div>
         )}
         
         {securityAlert && (
-          <div style={{ 
-            background: '#4b1c1c', 
-            color: '#ff8f40', 
-            padding: '12px 24px', 
-            borderBottom: '1px solid #1e2d3d',
-            position: 'relative',
-            fontSize: 14
-          }}>
-            <div style={{ marginRight: 20 }}>{securityAlert.message}</div>
-            <button 
-              style={{ 
-                position: 'absolute', 
-                top: 12, 
-                right: 24, 
-                background: 'none', 
-                border: 'none', 
-                color: '#ff8f40', 
-                cursor: 'pointer',
-                fontSize: 16
-              }}
-              onClick={dismissAlert}
-            >
-              ×
-            </button>
+          <div className={`alert-banner ${securityAlert.type}`}>
+            <span>{securityAlert.message}</span>
+            <button className="alert-dismiss" onClick={dismissAlert}>×</button>
           </div>
         )}
         
         {!connected ? (
-          <div style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'center',
-            alignItems: 'center',
-            padding: '0 24px'
-          }}>
-            <div style={{ 
-              maxWidth: '400px',
-              width: '100%'
-            }}>
-              <div style={{ 
-                display: 'flex', 
-                flexDirection: 'column', 
-                alignItems: 'center', 
-                marginBottom: 24 
-              }}>
-                <img 
-                  src={appIcon}
-                  alt="WhisperNet Logo" 
-                  style={{ 
-                    width: '120px', 
-                    height: '120px', 
-                    marginBottom: 16,
-                    borderRadius: '50%',
-                    border: '2px solid #1e2d3d'
-                  }} 
-                />
-                <div style={{ fontSize: 14, color: '#5ccfe6', marginTop: 8 }}>
-                  {getTimestamp()} Initializing secure connection...
+          <div className="login-screen">
+            <div className="login-card">
+              <div className="login-header">
+                <div className="login-logo">
+                  <img src={appIcon} alt="WhisperNet" />
                 </div>
+                <h2>Welcome to WhisperNet</h2>
+                <p>Secure, decentralized messaging</p>
               </div>
-              <form onSubmit={handleUsernameSubmit}>
+              <form className="login-form" onSubmit={handleUsernameSubmit}>
                 <input
-                  style={{ 
-                    width: '100%', 
-                    padding: 10, 
-                    marginBottom: 12, 
-                    borderRadius: 4, 
-                    border: '1px solid #1e2d3d', 
-                    background: '#0d1117',
-                    color: '#a2aabc',
-                    fontSize: 16,
-                    fontFamily: '"Fira Code", monospace',
-                    boxSizing: 'border-box'
-                  }}
-                  placeholder="Enter username"
+                  className="form-input"
+                  placeholder="Choose a username"
                   value={username}
                   onChange={e => {
                     setUsername(e.target.value);
@@ -2360,59 +2101,27 @@ function App() {
                   }}
                   required
                 />
-                {!usernameAvailable && <div style={{color: '#ff8f40', fontSize: 12, marginTop: -8, marginBottom: 8}}>Username not available.</div>}
+                {!usernameAvailable && <div className="form-error">Username not available</div>}
                 <button
-                  style={{
-                    width: '100%',
-                    padding: 10,
-                    borderRadius: 4,
-                    background: relayStatus === 'online' ?
-                      'linear-gradient(90deg, #5ccfe6, #bae67e)' :
-                      '#636b78',
-                    color: '#171c28',
-                    fontWeight: 'bold',
-                    fontSize: 16,
-                    border: 'none',
-                    cursor: relayStatus === 'online' && !isCheckingUsername ? 'pointer' : 'not-allowed',
-                    fontFamily: '"Fira Code", monospace'
-                  }}
+                  className="btn-primary"
                   type="submit"
                   disabled={relayStatus !== 'online' || isCheckingUsername}
                 >
-                  {isCheckingUsername ? 'CHECKING...' : (relayStatus === 'online' ? 'AUTHENTICATE' : 'SERVER OFFLINE')}
+                  {isCheckingUsername ? 'Checking...' : (relayStatus === 'online' ? 'Connect' : 'Server Offline')}
                 </button>
               </form>
               {relayStatus !== 'online' && (
-                <button 
-                  style={{ 
-                    width: '100%', 
-                    padding: 8, 
-                    marginTop: 8,
-                    borderRadius: 4, 
-                    background: '#4b1c1c', 
-                    color: '#ff8f40', 
-                    fontSize: 14, 
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontFamily: '"Fira Code", monospace'
-                  }} 
-                  onClick={retryConnection}
-                >
-                  RETRY CONNECTION
+                <button className="btn-secondary" style={{ marginTop: 16, width: '100%' }} onClick={retryConnection}>
+                  Retry Connection
                 </button>
               )}
-              <div style={{ marginTop: 12, color: '#ff3333', textAlign: 'center', fontSize: 14 }}>
+              <div className={`status-message ${relayStatus !== 'online' ? 'error' : ''}`}>
                 {status}
               </div>
             </div>
           </div>
         ) : (
-          <div style={{
-            flex: 1,
-            display: 'flex',
-            overflow: 'hidden'
-          }}>
-            {/* User list sidebar */}
+          <div className="main-content">
             <UserList 
               users={onlineUsers.map(user => ({ username: user, online: true }))}
               activeChats={activeChats}
@@ -2421,79 +2130,23 @@ function App() {
               currentUser={username}
               onClearHistory={handleClearAllHistory}
               onNewChat={handleNewChat}
+              chatMessages={chatMessages}
+              recipientStatuses={recipientStatuses}
             />
             
-            {/* Main chat area */}
-            <div style={{
-              flex: 1,
-              display: 'flex',
-              flexDirection: 'column',
-              overflow: 'hidden'
-            }}>
-              {/* Welcome screen or active chat */}
+            <div className="chat-area">
               {!currentChat ? (
-                <div style={{
-                  flex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                  padding: '0 24px',
-                  background: '#0d1117'
-                }}>
-                  <div style={{ 
-                    fontSize: 24, 
-                    color: '#5ccfe6', 
-                    marginBottom: 16,
-                    fontWeight: 'bold'
-                  }}>
-                    Welcome to WhisperNet
+                <div className="chat-empty">
+                  <div className="chat-empty-icon">
+                    <img src={appIcon} alt="WhisperNet" style={{ width: 40, height: 40, objectFit: 'contain' }} />
                   </div>
-                  <div style={{ 
-                    fontSize: 16, 
-                    color: '#a2aabc', 
-                    textAlign: 'center',
-                    maxWidth: 500,
-                    lineHeight: 1.5
-                  }}>
-                    Select a user from the sidebar to start a conversation or click on a username when you receive a message.
+                  <h3>Welcome to WhisperNet</h3>
+                  <p>Select a contact from the sidebar to start a secure conversation, or click "New Chat" to message someone new.</p>
+                  <div style={{ marginTop: 16, color: 'var(--text-muted)', fontSize: 14 }}>
+                    Logged in as <span style={{ color: 'var(--accent-primary)', fontWeight: 600 }}>{username}</span>
                   </div>
-                  <div style={{ 
-                    marginTop: 32,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    alignItems: 'center'
-                  }}>
-                    <div style={{ 
-                      fontSize: 14, 
-                      color: '#636b78', 
-                      marginBottom: 8 
-                    }}>
-                      Connected as:
-                    </div>
-                    <div style={{ 
-                      fontSize: 20, 
-                      color: '#bae67e', 
-                      fontWeight: 'bold' 
-                    }}>
-                      {username}
-                    </div>
-                  </div>
-                  <button 
-                    style={{ 
-                      marginTop: 32,
-                      padding: '8px 16px', 
-                      borderRadius: 4, 
-                      background: '#4b1c1c', 
-                      color: '#ff8f40', 
-                      fontSize: 14, 
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontFamily: '"Fira Code", monospace'
-                    }} 
-                    onClick={handleDisconnect}
-                  >
-                    DISCONNECT
+                  <button className="btn-disconnect" onClick={handleDisconnect}>
+                    Disconnect
                   </button>
                 </div>
               ) : (
@@ -2891,53 +2544,11 @@ function App() {
                   onVerifyIdentity={handleVerifyIdentity}
                 />
               )}
-              
-              {/* Connection status footer */}
-              <div style={{ 
-                display: 'flex', 
-                justifyContent: 'space-between', 
-                padding: '8px 16px',
-                borderTop: '1px solid #1e2d3d',
-                background: '#171c28'
-              }}>
-                <div style={{ 
-                  fontSize: 12, 
-                  color: '#636b78', 
-                  display: 'flex', 
-                  alignItems: 'center' 
-                }}>
-                  <div style={{ 
-                    width: 8, 
-                    height: 8, 
-                    borderRadius: '50%', 
-                    background: status.includes('Connected') || status.includes('Registered') ? '#bae67e' : '#ff3333',
-                    marginRight: 6 
-                  }}></div>
-                  {status.includes('Connected') || status.includes('Registered') ? 'SECURE CONNECTION' : 'CONNECTION LOST'}
-                </div>
-                
-                <button 
-                  style={{ 
-                    padding: '4px 12px', 
-                    borderRadius: 4, 
-                    background: '#4b1c1c', 
-                    color: '#ff8f40', 
-                    fontSize: 12, 
-                    border: 'none',
-                    cursor: 'pointer',
-                    fontFamily: '"Fira Code", monospace'
-                  }} 
-                  onClick={handleDisconnect}
-                >
-                  DISCONNECT
-                </button>
-              </div>
             </div>
           </div>
         )}
-      </div>
-      
-      {/* Verification Modal */}
+        
+        {/* Verification Modal */}
       <VerificationModal
         isOpen={showVerificationModal}
         onClose={handleCancelVerification}
