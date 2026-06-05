@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg_primary">
+
+    <!-- App Header -->
+    <LinearLayout
+        android:id="@+id/appHeader"
+        android:layout_width="match_parent"
+        android:layout_height="62dp"
+        android:orientation="horizontal"
+        android:paddingStart="24dp"
+        android:paddingEnd="24dp"
+        android:gravity="center_vertical"
+        android:background="@color/bg_secondary">
+
+        <!-- Logo + Name -->
+        <ImageView
+            android:id="@+id/ivHeaderLogo"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:src="@drawable/ic_whispernet"
+            android:background="@drawable/bg_gradient_primary" />
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="WhisperNet"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:textColor="@color/accent_primary"
+            android:layout_marginStart="12dp" />
+
+        <!-- Theme Toggle -->
+        <Button
+            android:id="@+id/btnThemeToggle"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="🌙 Dark"
+            android:textSize="11sp"
+            android:textColor="@color/text_inverse"
+            android:background="@drawable/bg_pill_accent"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp" />
+
+        <!-- Connection Badge -->
+        <LinearLayout
+            android:id="@+id/connectionBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:paddingStart="14dp"
+            android:paddingEnd="14dp"
+            android:layout_marginStart="12dp"
+            android:background="@drawable/bg_border_pill">
+
+            <View
+                android:id="@+id/statusDot"
+                android:layout_width="8dp"
+                android:layout_height="8dp"
+                android:background="@drawable/shape_circle" />
+
+            <TextView
+                android:id="@+id/tvConnectionStatus"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Connected"
+                android:textSize="13sp"
+                android:textColor="@color/text_primary"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
+
+        <!-- About button -->
+        <Button
+            android:id="@+id/btnAbout"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:text="About"
+            android:textSize="13sp"
+            android:textColor="@color/text_secondary"
+            android:background="@drawable/bg_border_pill"
+            android:layout_marginStart="12dp" />
+    </LinearLayout>
+
+    <!-- Divider -->
+    <View android:layout_width="match_parent" android:layout_height="1dp" android:background="@color/border_color"/>
+
+    <!-- Content: Contacts + Chat side by side (tablet) or navigation (phone) -->
+    <FrameLayout
+        android:id="@+id/mainContentContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+</LinearLayout>

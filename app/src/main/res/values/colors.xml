@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Dark Theme (default) -->
+    <color name="bg_primary">#0F1419</color>
+    <color name="bg_secondary">#1A1F26</color>
+    <color name="bg_tertiary">#242B35</color>
+    <color name="bg_hover">#2D3542</color>
+    <color name="bg_card">#1A1F26</color>
+
+    <color name="accent_primary">#00D4AA</color>
+    <color name="accent_secondary">#00B894</color>
+    <color name="accent_hover">#00E6B8</color>
+    <color name="accent_glow">#4D00D4AA</color>
+
+    <color name="status_online">#2ECC71</color>
+    <color name="status_offline">#E74C3C</color>
+    <color name="status_away">#F39C12</color>
+
+    <color name="text_primary">#FFFFFF</color>
+    <color name="text_secondary">#A0AEC0</color>
+    <color name="text_muted">#718096</color>
+    <color name="text_inverse">#0F1419</color>
+
+    <color name="border_color">#2D3748</color>
+    <color name="border_light">#3D4A5C</color>
+
+    <!-- Light Theme -->
+    <color name="bg_primary_light">#F8FAFC</color>
+    <color name="bg_secondary_light">#FFFFFF</color>
+    <color name="bg_tertiary_light">#F1F5F9</color>
+    <color name="accent_primary_light">#0284C7</color>
+    <color name="text_primary_light">#0F172A</color>
+    <color name="text_secondary_light">#334155</color>
+    <color name="text_muted_light">#64748B</color>
+    <color name="border_color_light">#E2E8F0</color>
+    <color name="status_online_light">#16A34A</color>
+    <color name="status_offline_light">#DC2626</color>
+
+    <!-- Alert colors -->
+    <color name="alert_warning">#F39C12</color>
+    <color name="alert_error">#E74C3C</color>
+    <color name="alert_success">#2ECC71</color>
+    <color name="alert_info">#3498DB</color>
+
+    <!-- Verification colors -->
+    <color name="verified_color">#22C55E</color>
+    <color name="unverified_color">#F59E0B</color>
+    <color name="warning_color">#EF4444</color>
+    <color name="info_color">#3B82F6</color>
+</resources>

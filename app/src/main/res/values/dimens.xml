@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="radius_sm">6dp</dimen>
+    <dimen name="radius_md">10dp</dimen>
+    <dimen name="radius_lg">16dp</dimen>
+    <dimen name="sidebar_width">320dp</dimen>
+    <dimen name="avatar_size_sm">40dp</dimen>
+    <dimen name="avatar_size_md">48dp</dimen>
+    <dimen name="avatar_size_lg">72dp</dimen>
+    <dimen name="message_max_width">280dp</dimen>
+    <dimen name="header_height">62dp</dimen>
+    <dimen name="input_height">50dp</dimen>
+</resources>
